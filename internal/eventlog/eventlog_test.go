@@ -86,3 +86,24 @@ func TestRecordAppendsJSONLines(t *testing.T) {
 		t.Fatalf("記録:\n got %s\nwant %s", b, want)
 	}
 }
+
+func TestRecordKeepsLogPrivateToTheUser(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	l := &Log{Dir: dir, Project: "demo", RetentionMonths: 3, Now: func() time.Time { return time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC) }}
+	if err := l.Record(Event{Event: "acquire", Holder: "/w/a"}); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, dir, 0o700)
+	assertMode(t, filepath.Join(dir, "events-2026-09.jsonl"), 0o600)
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s: mode %o, want %o", path, got, want)
+	}
+}

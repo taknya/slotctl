@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -85,5 +87,23 @@ func TestLeaseRoundTrip(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenKeepsStatePrivateToTheUser(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	for path, want := range map[string]os.FileMode{dir: 0o700, filepath.Join(dir, DBName): 0o600} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s: mode %o, want %o", path, got, want)
+		}
 	}
 }

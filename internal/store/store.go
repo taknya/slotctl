@@ -52,9 +52,16 @@ type Store struct{ db *sql.DB }
 
 // Open は、dirのstate.dbを開く。transactionは常にBEGIN IMMEDIATEで始まり、複数のprocessから安全に使える。
 func Open(dir string) (*Store, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 借り手のpathを持つので、同じmachineの他の利用者から読めないようにする
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// SQLiteに作らせると0644になるので、先に空のfileを0600で作る（journalもこの権限に合わせて作られる）
+	f, err := os.OpenFile(filepath.Join(dir, DBName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(15000)")
 	q.Set("_txlock", "immediate")
