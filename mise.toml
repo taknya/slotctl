@@ -1,0 +1,3 @@
+# toolchainの版の正本。開発機は`mise exec -- go ...`、CIは`jdx/mise-action`がここの版を入れる。
+[tools]
+go = "1.27.1"
