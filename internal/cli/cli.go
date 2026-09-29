@@ -49,10 +49,10 @@ func usagef(format string, args ...any) error {
 const usageText = `使い方: slotctl <命令> [option]
 
 命令:
-  acquire [--json]  枠を借りる（同じholderなら期限を延ばして同じ枠を返す）
-  renew             holderの枠の期限を延ばす（commandは走らせない）
-  release           holderの枠のdownを走らせて返す
-  status [--json]   projectの全枠の状態を出す
+  acquire [pool] [--json]  poolの枠を借りる（poolを省くと既定のpool。同じholderなら期限を延ばして同じ枠を返す）
+  renew                    holderの全poolの枠の期限を延ばす（commandは走らせない）
+  release [pool]           holderのpoolの枠のdownを走らせて返す（poolを省くと全poolの枠）
+  status [--json]          projectの全poolの全枠の状態を出す
 
 終了code: 0=成功 1=その他の失敗 2=使い方の誤り 3=空きが無い
 `
@@ -101,23 +101,31 @@ func (a *App) exitCode(err error) int {
 	return ExitFailure
 }
 
-func (a *App) parse(name string, args []string, withJSON bool) (asJSON bool, err error) {
+// parse は、flagと、最大maxPos個の位置引数（pool名）を解釈する。位置引数はflagの前後どちらにも置ける。
+func (a *App) parse(name string, args []string, withJSON bool, maxPos int) (asJSON bool, pos []string, err error) {
 	fs := flag.NewFlagSet("slotctl "+name, flag.ContinueOnError)
 	fs.SetOutput(a.Stderr)
 	var j *bool
 	if withJSON {
 		j = fs.Bool("json", false, "JSONで出力する")
 	}
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return false, err
+	for {
+		if err := fs.Parse(args); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return false, nil, err
+			}
+			return false, nil, usagef("%v", err)
 		}
-		return false, usagef("%v", err)
+		if fs.NArg() == 0 {
+			break
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
 	}
-	if fs.NArg() > 0 {
-		return false, usagef("%s に余分な引数があります: %v", name, fs.Args())
+	if len(pos) > maxPos {
+		return false, nil, usagef("%s に余分な引数があります: %v", name, pos[maxPos:])
 	}
-	return j != nil && *j, nil
+	return j != nil && *j, pos, nil
 }
 
 // session は、1回の命令が使う設定・状態・規則をまとめる。
@@ -178,9 +186,31 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+// pool は、位置引数のpool名（無ければ既定pool）の設定を返す。無いpoolは使い方の誤り。
+func (s *session) pool(pos []string) (config.Pool, error) {
+	name := config.DefaultPool
+	if len(pos) > 0 {
+		name = pos[0]
+	}
+	p, ok := s.cfg.Pool(name)
+	if !ok {
+		return config.Pool{}, s.unknownPool(name)
+	}
+	return p, nil
+}
+
+func (s *session) unknownPool(name string) error {
+	var names []string
+	for _, p := range s.cfg.Pools() {
+		names = append(names, p.Name)
+	}
+	return usagef("未知のpool %q です（設定にあるpool: %s）", name, strings.Join(names, "・"))
+}
+
 // AcquireResult は、acquire --json の出力である。
 type AcquireResult struct {
 	Project        string         `json:"project"`
+	Pool           string         `json:"pool"`
 	Slot           int            `json:"slot"`
 	Name           string         `json:"name"`
 	Holder         string         `json:"holder"`
@@ -190,7 +220,7 @@ type AcquireResult struct {
 }
 
 func (a *App) acquire(args []string) error {
-	asJSON, err := a.parse("acquire", args, true)
+	asJSON, pos, err := a.parse("acquire", args, true, 1)
 	if err != nil {
 		return err
 	}
@@ -199,8 +229,12 @@ func (a *App) acquire(args []string) error {
 		return noProjectFileIsUsage(err)
 	}
 	defer s.close()
+	pool, err := s.pool(pos)
+	if err != nil {
+		return err
+	}
 
-	g, err := s.mgr.Acquire(context.Background())
+	g, err := s.mgr.Acquire(context.Background(), pool)
 	if err != nil {
 		var ne *lease.NoSlotError
 		if errors.As(err, &ne) {
@@ -210,6 +244,7 @@ func (a *App) acquire(args []string) error {
 	}
 	res := AcquireResult{
 		Project:        s.cfg.Project,
+		Pool:           pool.Name,
 		Slot:           g.Slot,
 		Name:           g.Name,
 		Holder:         g.Holder,
@@ -243,8 +278,9 @@ func (a *App) printNoSlot(ne *lease.NoSlotError, asJSON bool) {
 		writeJSON(a.Stdout, struct {
 			Error   string       `json:"error"`
 			Project string       `json:"project"`
+			Pool    string       `json:"pool"`
 			Holders []holderJSON `json:"holders"`
-		}{"no free slot", ne.Project, hs})
+		}{"no free slot", ne.Project, ne.Pool, hs})
 	}
 }
 
@@ -256,7 +292,7 @@ func noProjectFileIsUsage(err error) error {
 }
 
 func (a *App) renew(args []string) error {
-	if _, err := a.parse("renew", args, false); err != nil {
+	if _, _, err := a.parse("renew", args, false, 0); err != nil {
 		return err
 	}
 	s, err := a.open()
@@ -272,7 +308,8 @@ func (a *App) renew(args []string) error {
 }
 
 func (a *App) release(args []string) error {
-	if _, err := a.parse("release", args, false); err != nil {
+	_, pos, err := a.parse("release", args, false, 1)
+	if err != nil {
 		return err
 	}
 	s, err := a.open()
@@ -283,10 +320,18 @@ func (a *App) release(args []string) error {
 		return err
 	}
 	defer s.close()
-	return s.mgr.Release(context.Background())
+	pool := ""
+	if len(pos) > 0 {
+		if _, ok := s.cfg.Pool(pos[0]); !ok {
+			return s.unknownPool(pos[0])
+		}
+		pool = pos[0]
+	}
+	return s.mgr.Release(context.Background(), pool)
 }
 
 type statusSlot struct {
+	Pool      string         `json:"pool"`
 	Slot      int            `json:"slot"`
 	Name      string         `json:"name"`
 	State     lease.State    `json:"state"`
@@ -296,7 +341,7 @@ type statusSlot struct {
 }
 
 func (a *App) status(args []string) error {
-	asJSON, err := a.parse("status", args, true)
+	asJSON, _, err := a.parse("status", args, true, 0)
 	if err != nil {
 		return err
 	}
@@ -313,7 +358,7 @@ func (a *App) status(args []string) error {
 	if asJSON {
 		out := make([]statusSlot, len(slots))
 		for i, st := range slots {
-			out[i] = statusSlot{Slot: st.Slot, Name: st.Name, State: st.State, Holder: st.Holder, Ports: ports.Map(st.Ports)}
+			out[i] = statusSlot{Pool: st.Pool, Slot: st.Slot, Name: st.Name, State: st.State, Holder: st.Holder, Ports: ports.Map(st.Ports)}
 			if st.State != lease.Free {
 				out[i].ExpiresAt = a.formatTime(st.ExpiresAt)
 			}
@@ -324,13 +369,13 @@ func (a *App) status(args []string) error {
 		}{s.cfg.Project, out})
 	}
 	tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "SLOT\tNAME\tSTATE\tHOLDER\tEXPIRES\tPORT")
+	fmt.Fprintln(tw, "POOL\tSLOT\tNAME\tSTATE\tHOLDER\tEXPIRES\tPORT")
 	for _, st := range slots {
 		holder, exp := "-", "-"
 		if st.State != lease.Free {
 			holder, exp = st.Holder, a.formatTime(st.ExpiresAt)
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\n", st.Slot, st.Name, st.State, holder, exp, portList(st.Ports))
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\n", st.Pool, st.Slot, st.Name, st.State, holder, exp, portList(st.Ports))
 	}
 	return tw.Flush()
 }

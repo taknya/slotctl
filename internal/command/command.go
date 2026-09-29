@@ -15,6 +15,7 @@ import (
 // Vars は、commandに渡す枠の情報である。
 type Vars struct {
 	Project string
+	Pool    string
 	Slot    int
 	Name    string
 	Holder  string
@@ -28,6 +29,7 @@ func Env(base []string, v Vars) []string {
 	env := append([]string{}, base...)
 	env = append(env,
 		"SLOTCTL_PROJECT="+v.Project,
+		"SLOTCTL_POOL="+v.Pool,
 		fmt.Sprintf("SLOTCTL_SLOT=%d", v.Slot),
 		"SLOTCTL_NAME="+v.Name,
 		"SLOTCTL_HOLDER="+v.Holder,
