@@ -265,3 +265,7 @@ internal/holder/    holderとrepositoryの識別
 internal/ports/     portの帯と割り当て
 internal/cli/       flag・出力・終了code
 ```
+
+## ライセンス
+
+[MIT License](LICENSE)。Copyright (c) 2026 taknya
