@@ -37,7 +37,8 @@ func monthIndex(year, month int) int { return year*12 + month - 1 }
 
 // Record は、eventを追記する。書くときに、古い記録を消す。
 func (l *Log) Record(ev Event) error {
-	if err := os.MkdirAll(l.Dir, 0o755); err != nil {
+	// 借り手のpathを持つので、同じmachineの他の利用者から読めないようにする
+	if err := os.MkdirAll(l.Dir, 0o700); err != nil {
 		return err
 	}
 	now := l.Now()
@@ -49,7 +50,7 @@ func (l *Log) Record(ev Event) error {
 		return err
 	}
 	name := "events-" + now.Format("2006-01") + ".jsonl"
-	f, err := os.OpenFile(filepath.Join(l.Dir, name), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(filepath.Join(l.Dir, name), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
