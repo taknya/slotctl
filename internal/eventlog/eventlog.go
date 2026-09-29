@@ -15,6 +15,7 @@ type Event struct {
 	At             string `json:"at"`
 	Event          string `json:"event"`
 	Project        string `json:"project"`
+	Pool           string `json:"pool,omitempty"`
 	Slot           int    `json:"slot,omitempty"`
 	Holder         string `json:"holder"`
 	PreviousHolder string `json:"previous_holder,omitempty"`

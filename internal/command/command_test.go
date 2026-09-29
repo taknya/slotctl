@@ -36,3 +36,19 @@ func TestRunReportsFailure(t *testing.T) {
 		t.Fatal("失敗するcommandはerrorを返すはず")
 	}
 }
+
+func TestEnvIncludesPool(t *testing.T) {
+	env := Env(nil, Vars{Project: "demo", Pool: "billing", Slot: 1, Name: "demo-billing-1"})
+	var pool, name string
+	for _, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, "SLOTCTL_POOL="):
+			pool = kv
+		case strings.HasPrefix(kv, "SLOTCTL_NAME="):
+			name = kv
+		}
+	}
+	if pool != "SLOTCTL_POOL=billing" || name != "SLOTCTL_NAME=demo-billing-1" {
+		t.Fatalf("env: %v", env)
+	}
+}

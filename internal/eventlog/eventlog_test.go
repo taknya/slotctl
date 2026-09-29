@@ -87,6 +87,22 @@ func TestRecordAppendsJSONLines(t *testing.T) {
 	}
 }
 
+func TestRecordWritesPool(t *testing.T) {
+	dir := t.TempDir()
+	l := newLog(dir, 3, time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC))
+	if err := l.Record(Event{Event: "down", Pool: "billing", Holder: "/h", Slot: 1}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "events-2026-09.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"at":"2026-09-15T10:00:00Z","event":"down","project":"demo","pool":"billing","slot":1,"holder":"/h"}` + "\n"
+	if string(b) != want {
+		t.Fatalf("記録:\n got %s\nwant %s", b, want)
+	}
+}
+
 func TestRecordKeepsLogPrivateToTheUser(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	l := &Log{Dir: dir, Project: "demo", RetentionMonths: 3, Now: func() time.Time { return time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC) }}

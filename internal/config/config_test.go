@@ -115,3 +115,78 @@ func TestLoadWithoutProjectFile(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestLoadPools(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	write(t, filepath.Join(root, "slotctl.toml"), `
+project = "demo"
+[slots]
+count = 2
+[ports]
+names = ["web"]
+[commands]
+up = "u"
+[pools.tunnel]
+[pools.billing]
+count = 3
+up = "bu"
+down = "bd"
+ports = ["x", "y"]
+`)
+	write(t, filepath.Join(home, "config.toml"), `
+[projects.demo.pools.billing]
+slots = 4
+[projects.demo.pools.gone]
+slots = 2
+`)
+	cfg, err := Load(env(map[string]string{"SLOTCTL_HOME": home}), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pools := cfg.Pools()
+	if len(pools) != 3 || pools[0].Name != DefaultPool || pools[1].Name != "billing" || pools[2].Name != "tunnel" {
+		t.Fatalf("poolの順番は既定→名前順のはず: %+v", pools)
+	}
+	if d := pools[0]; d.Count != 2 || d.Up != "u" || d.Down != "" || len(d.PortNames) != 1 {
+		t.Fatalf("既定pool: %+v", d)
+	}
+	b, ok := cfg.Pool("billing")
+	if !ok || b.Count != 4 || b.Up != "bu" || b.Down != "bd" || len(b.PortNames) != 2 {
+		t.Fatalf("billing（machine設定でcountを上書き）: %+v", b)
+	}
+	if tu, _ := cfg.Pool("tunnel"); tu.Count != 1 || tu.Up != "" || tu.Down != "" || len(tu.PortNames) != 0 {
+		t.Fatalf("tunnel（既定の[commands]を引き継がない）: %+v", tu)
+	}
+	if _, ok := cfg.Pool("nope"); ok {
+		t.Fatal("無いpoolは見つからないはず")
+	}
+	if cfg.SlotNameIn(DefaultPool, 2) != "demo-2" || cfg.SlotNameIn("billing", 2) != "demo-billing-2" || cfg.SlotName(1) != "demo-1" {
+		t.Fatal("枠の名前")
+	}
+}
+
+func TestLoadRejectsInvalidPools(t *testing.T) {
+	home := t.TempDir()
+	for name, toml := range map[string]string{
+		"[pools.default]": "project = \"demo\"\n[pools.default]\n",
+		"pool名が大文字":       "project = \"demo\"\n[pools.Billing]\n",
+		"pool名が数字始まり":     "project = \"demo\"\n[pools.\"1a\"]\n",
+		"pool名に_":         "project = \"demo\"\n[pools.a_b]\n",
+		"poolの未知のkey":     "project = \"demo\"\n[pools.a]\nbogus = 1\n",
+		"poolの数が多すぎる":     "project = \"demo\"\n[pools.a]\ncount = 11\n",
+		"poolのport名が重なる":  "project = \"demo\"\n[pools.a]\nports = [\"x\", \"X\"]\n",
+	} {
+		root := t.TempDir()
+		write(t, filepath.Join(root, "slotctl.toml"), toml)
+		if _, err := Load(env(map[string]string{"SLOTCTL_HOME": home}), root); err == nil {
+			t.Errorf("%s: エラーになるはず", name)
+		}
+	}
+	// pool名に-と数字は使える。
+	root := t.TempDir()
+	write(t, filepath.Join(root, "slotctl.toml"), "project = \"demo\"\n[pools.e2e-2]\n")
+	if _, err := Load(env(map[string]string{"SLOTCTL_HOME": home}), root); err != nil {
+		t.Errorf("e2e-2: %v", err)
+	}
+}
