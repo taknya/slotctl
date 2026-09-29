@@ -43,11 +43,24 @@ slotctlは、実行環境を「worktreeの持ち物」から「machineが持つ�
 
 ## 入れ方
 
+[Releases](https://github.com/taknya/slotctl/releases)に、darwin・linux（arm64・amd64）のbinaryを置いている。Goは要らない。
+
+miseで版を固定するなら、repositoryの`mise.toml`に書く。
+
+```toml
+[tools]
+"github:taknya/slotctl" = "0.1.0"
+```
+
+Goがあれば`go install`でも入る。
+
 ```sh
 go install github.com/taknya/slotctl/cmd/slotctl@latest
 ```
 
-Goの版は`mise.toml`が決める。手元で試すときは次を使う。
+`v*`のtagをpushすると、CI（`.github/workflows/release.yml`）がtestを通してからbinaryを作り、Releaseに置く。
+
+slotctl自体の開発では、Goの版は`mise.toml`が決める。手元で試すときは次を使う。
 
 ```sh
 mise install
