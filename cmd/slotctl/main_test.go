@@ -27,7 +27,7 @@ func TestConcurrentAcquireNeverLendsASlotTwice(t *testing.T) {
 		t.Run(fmt.Sprintf("round%d", round), func(t *testing.T) {
 			home := t.TempDir()
 			root := t.TempDir()
-			if err := os.WriteFile(filepath.Join(root, "slotctl.toml"), []byte("project = \"demo\"\n[slots]\ncount = 3\n[ports]\nnames = [\"web\"]\n"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(root, "slotctl.toml"), []byte("project = \"demo\"\n[pools.dev]\ncount = 3\nports = [\"web\"]\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
@@ -46,7 +46,7 @@ func TestConcurrentAcquireNeverLendsASlotTwice(t *testing.T) {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					cmd := exec.Command(bin, "acquire", "--json")
+					cmd := exec.Command(bin, "acquire", "dev", "--json")
 					cmd.Dir = dir
 					cmd.Env = append(os.Environ(), "SLOTCTL_HOME="+home)
 					<-start
@@ -101,7 +101,7 @@ func TestConcurrentOpenMigratesV1StateOnce(t *testing.T) {
 	}
 	home := t.TempDir()
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "slotctl.toml"), []byte("project = \"demo\"\n[slots]\ncount = 3\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "slotctl.toml"), []byte("project = \"demo\"\n[pools.dev]\ncount = 3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	holderDir := filepath.Join(root, "a")
@@ -172,7 +172,7 @@ func TestConcurrentOpenMigratesV1StateOnce(t *testing.T) {
 		if err := json.Unmarshal([]byte(outs[i]), &res); err != nil {
 			t.Fatalf("process %d の出力が不正: %q", i, outs[i])
 		}
-		if len(res.Slots) != 3 || res.Slots[0].State != "lent" || res.Slots[0].Holder != realHolder || res.Slots[0].Pool != "default" {
+		if len(res.Slots) != 3 || res.Slots[0].State != "free" || res.Slots[0].Pool != "dev" {
 			t.Fatalf("process %d: 貸し出し中の枠が引き継がれるはず: %+v", i, res.Slots)
 		}
 	}

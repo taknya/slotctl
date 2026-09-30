@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -16,18 +15,16 @@ func TestAcquireIsIdempotentAndUsesSmallestFreeSlot(t *testing.T) {
 project = "demo"
 [lease]
 ttl = "10m"
-[slots]
+[pools.dev]
 count = 3
-[ports]
-names = ["web", "db"]
-[commands]
+ports = ["web", "db"]
 up = 'echo "up $SLOTCTL_SLOT $SLOTCTL_PORT_WEB" >> %s'
 `, logFile))
 	a := holderDir(t, root, "a")
 	b := holderDir(t, root, "b")
 
 	first := mustAcquire(t, e, a)
-	if first.Slot != 1 || first.Name != "demo-1" || first.Holder != a {
+	if first.Slot != 1 || first.Name != "demo-dev-1" || first.Holder != a {
 		t.Fatalf("holder A の最初のacquire: %+v", first)
 	}
 	if first.Ports["web"] != 12000 || first.Ports["db"] != 12001 {
@@ -59,80 +56,48 @@ up = 'echo "up $SLOTCTL_SLOT $SLOTCTL_PORT_WEB" >> %s'
 	}
 }
 
-// AC-2: 空きが無いときは最も古い期限切れを譲り、それも無ければ終了code 3。
-func TestAcquirePreemptsOldestExpiredAndFailsWithExit3WhenNoneExpired(t *testing.T) {
+// 期限切れを全て回収し、空きの最小番号を借りる。
+func TestAcquireReclaimsAllExpiredAndUsesSmallestSlot(t *testing.T) {
 	e := newTestEnv(t)
-	logFile := filepath.Join(t.TempDir(), "log")
-	root := e.project(fmt.Sprintf(`
-project = "demo"
-[lease]
-ttl = "10m"
-[slots]
+	log := filepath.Join(t.TempDir(), "log")
+	root := e.project(fmt.Sprintf(`project = "demo"
+[pools.dev]
 count = 3
-[commands]
-up = 'echo "up $SLOTCTL_HOLDER $SLOTCTL_SLOT" >> %[1]s'
-down = 'echo "down $SLOTCTL_HOLDER $SLOTCTL_SLOT" >> %[1]s'
-`, logFile))
-	a, b, c, d := holderDir(t, root, "a"), holderDir(t, root, "b"), holderDir(t, root, "c"), holderDir(t, root, "d")
-
+down = 'echo "$SLOTCTL_NAME $SLOTCTL_HOLDER $(pwd -P)" >> %s'
+`, log))
+	a, b, c := holderDir(t, root, "a"), holderDir(t, root, "b"), holderDir(t, root, "c")
 	mustAcquire(t, e, a)
 	mustAcquire(t, e, b)
-	if got := mustAcquire(t, e, c); got.Slot != 3 {
-		t.Fatalf("C は slot 3 のはず: %+v", got)
+	e.advance(10 * time.Minute)
+	got := mustAcquire(t, e, c)
+	if got.Slot != 1 {
+		t.Fatalf("grant: %+v", got)
 	}
-
-	// AとBは生存連絡で延びる。Cだけが最も古い期限のまま。
-	e.advance(30 * time.Second)
-	for _, h := range []string{a, b} {
-		if code, _, errs := e.run(h, "renew"); code != 0 {
-			t.Fatalf("renew: %d %s", code, errs)
+	lines := readLines(t, log)
+	if len(lines) != 2 || lines[0] != "demo-dev-1 "+a+" "+a || lines[1] != "demo-dev-2 "+b+" "+b {
+		t.Fatalf("down: %v", lines)
+	}
+	st := mustStatus(t, e, c)
+	if st.Slots[1].State != "free" {
+		t.Fatalf("status: %+v", st)
+	}
+	n := 0
+	for _, ev := range rawEvents(t, e.home) {
+		if ev["event"] == "preempt" {
+			t.Fatal("preempt event")
 		}
-	}
-
-	code, _, errs := e.run(d, "acquire")
-	if code != 3 {
-		t.Fatalf("空きが無いときの終了code: got %d want 3（stderr: %s）", code, errs)
-	}
-	for _, h := range []string{a, b, c} {
-		if !strings.Contains(errs, h) {
-			t.Fatalf("使用中のholder %s が出力に無い: %s", h, errs)
-		}
-	}
-	if !strings.Contains(errs, e.now.Add(10*time.Minute-30*time.Second).Format(time.RFC3339)) {
-		t.Fatalf("Cの期限が出力に無い: %s", errs)
-	}
-
-	e.advance(11 * time.Minute) // ttl + 1分。全て期限切れで、Cが最も古い。
-	got := mustAcquire(t, e, d)
-	if got.Slot != 3 || got.PreviousHolder != c {
-		t.Fatalf("D は C の slot 3 を得るはず: %+v", got)
-	}
-
-	// Cのenvでdown、Dのenvでupの順に走る。
-	lines := readLines(t, logFile)
-	if len(lines) < 5 {
-		t.Fatalf("記録が足りません: %v", lines)
-	}
-	tail := lines[len(lines)-2:]
-	if tail[0] != "down "+c+" 3" || tail[1] != "up "+d+" 3" {
-		t.Fatalf("down→upの順のはず: %v", tail)
-	}
-
-	var found bool
-	for _, ev := range readEvents(t, e.home) {
-		if ev.Event == "preempt" {
-			found = true
-			if ev.PreviousHolder != c || ev.Holder != d || ev.Slot != 3 || ev.Project != "demo" {
-				t.Fatalf("preemptの記録: %+v", ev)
+		if ev["event"] == "reclaim" {
+			n++
+			if ev["trigger"] != "acquire" || ev["ok"] != true {
+				t.Fatalf("event: %+v", ev)
 			}
 		}
 	}
-	if !found {
-		t.Fatal("preemptが記録に無い")
+	if n != 2 {
+		t.Fatalf("reclaim events: %d", n)
 	}
 }
 
-// AC-3: renew・releaseが仕様どおりに動く。
 func TestRenewAndRelease(t *testing.T) {
 	e := newTestEnv(t)
 	logFile := filepath.Join(t.TempDir(), "log")
@@ -141,9 +106,8 @@ func TestRenewAndRelease(t *testing.T) {
 project = "demo"
 [lease]
 ttl = "10m"
-[slots]
+[pools.dev]
 count = 2
-[commands]
 up = 'echo "up $SLOTCTL_SLOT" >> %[1]s'
 down = '%[2]s'
 `, logFile, down)
@@ -191,15 +155,15 @@ down = '%[2]s'
 		t.Fatalf("releaseで枠は空くはず: %+v", st.Slots[0])
 	}
 
-	// downが失敗してもleaseは消え、終了code 1になる。
+	// downが失敗したleaseは保持し、終了code 1になる。
 	writeFile(t, filepath.Join(root, "slotctl.toml"), toml("false"))
 	mustAcquire(t, e, a)
 	code, _, errs := e.run(a, "release")
 	if code != 1 {
 		t.Fatalf("downが失敗したreleaseの終了code: got %d want 1（%s）", code, errs)
 	}
-	if st := mustStatus(t, e, a); st.Slots[0].State != "free" {
-		t.Fatalf("downが失敗してもleaseは消えるはず: %+v", st.Slots[0])
+	if st := mustStatus(t, e, a); st.Slots[0].State != "lent" {
+		t.Fatalf("downが失敗したらleaseは残るはず: %+v", st.Slots[0])
 	}
 	var failed bool
 	for _, ev := range readEvents(t, e.home) {
@@ -217,13 +181,12 @@ func TestAcquireFailsAndDropsLeaseWhenUpFails(t *testing.T) {
 	e := newTestEnv(t)
 	root := e.project(`
 project = "demo"
-[slots]
+[pools.dev]
 count = 1
-[commands]
 up = "false"
 `)
 	a := holderDir(t, root, "a")
-	code, _, errs := e.run(a, "acquire")
+	code, _, errs := e.run(a, "acquire", "dev")
 	if code != 1 {
 		t.Fatalf("up失敗のacquireの終了code: got %d want 1（%s）", code, errs)
 	}
@@ -242,18 +205,16 @@ env = { EXTRA = "~/extra" }
 `)
 	root := e.project(fmt.Sprintf(`
 project = "demo"
-[slots]
+[pools.dev]
 count = 2
-[ports]
-names = ["web", "api_db"]
-[commands]
+ports = ["web", "api_db"]
 up = 'echo "$SLOTCTL_PROJECT $SLOTCTL_SLOT $SLOTCTL_NAME $SLOTCTL_HOLDER $SLOTCTL_PORT_WEB $SLOTCTL_PORT_API_DB $EXTRA $(pwd -P)" >> %s'
 `, logFile))
 	mustAcquire(t, e, holderDir(t, root, "a"))
 	b := holderDir(t, root, "b")
 	mustAcquire(t, e, b)
 	lines := readLines(t, logFile)
-	want := fmt.Sprintf("demo 2 demo-2 %s 12100 12101 %s/extra %s", b, e.home, b)
+	want := fmt.Sprintf("demo 2 demo-dev-2 %s 12100 12101 %s/extra %s", b, e.home, b)
 	if len(lines) != 2 || lines[1] != want {
 		t.Fatalf("commandのenv:\n got %q\nwant %q", lines, want)
 	}

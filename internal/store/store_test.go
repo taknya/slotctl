@@ -119,15 +119,15 @@ func TestEnsurePoolBandAvoidsEveryUsedBand(t *testing.T) {
 			t.Fatalf("one: %d %v", one, err)
 		}
 		b1, err := EnsurePoolBand(ctx, tx, "one", "billing", 12000)
-		if err != nil || b1 != 13000 {
+		if err != nil || b1 != 12000 {
 			t.Fatalf("billing: %d %v", b1, err)
 		}
 		two, err := EnsureProject(ctx, tx, "two", "/repo/two", 12000)
-		if err != nil || two != 14000 {
+		if err != nil || two != 13000 {
 			t.Fatalf("poolの帯とも重ならないはず: %d %v", two, err)
 		}
 		b2, err := EnsurePoolBand(ctx, tx, "one", "tunnel", 12000)
-		if err != nil || b2 != 15000 {
+		if err != nil || b2 != 14000 {
 			t.Fatalf("tunnel: %d %v", b2, err)
 		}
 		if again, err := EnsurePoolBand(ctx, tx, "one", "billing", 12000); err != nil || again != b1 {

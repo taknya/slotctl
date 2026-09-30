@@ -117,7 +117,7 @@ func readEvents(t *testing.T, dir string) []eventlog.Event {
 
 func mustAcquire(t *testing.T, e *testEnv, cwd string) AcquireResult {
 	t.Helper()
-	code, out, errs := e.run(cwd, "acquire", "--json")
+	code, out, errs := e.run(cwd, "acquire", "dev", "--json")
 	if code != 0 {
 		t.Fatalf("acquire が終了code %d（stderr: %s）", code, errs)
 	}

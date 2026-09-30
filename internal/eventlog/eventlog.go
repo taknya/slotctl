@@ -12,16 +12,16 @@ import (
 
 // Event は、記録の1行である。
 type Event struct {
-	At             string `json:"at"`
-	Event          string `json:"event"`
-	Project        string `json:"project"`
-	Pool           string `json:"pool,omitempty"`
-	Slot           int    `json:"slot,omitempty"`
-	Holder         string `json:"holder"`
-	PreviousHolder string `json:"previous_holder,omitempty"`
-	OK             *bool  `json:"ok,omitempty"`
-	MS             *int64 `json:"ms,omitempty"`
-	Error          string `json:"error,omitempty"`
+	At      string `json:"at"`
+	Event   string `json:"event"`
+	Project string `json:"project"`
+	Pool    string `json:"pool,omitempty"`
+	Slot    int    `json:"slot,omitempty"`
+	Holder  string `json:"holder"`
+	Trigger string `json:"trigger,omitempty"`
+	OK      *bool  `json:"ok,omitempty"`
+	MS      *int64 `json:"ms,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // Log は、記録の置き場である。
