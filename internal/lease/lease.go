@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"time"
 
 	"github.com/taknya/slotctl/internal/command"
@@ -36,7 +35,7 @@ type Manager struct {
 	Warn io.Writer
 }
 
-// NoSlotError は、poolに空きが無い（貸し出し中で、期限切れも無い）ことを表す。
+// NoSlotError は、掃除後もpoolに空きが無いことを表す。
 type NoSlotError struct {
 	Project string
 	Pool    string
@@ -44,9 +43,6 @@ type NoSlotError struct {
 }
 
 func (e *NoSlotError) Error() string {
-	if e.Pool == config.DefaultPool {
-		return fmt.Sprintf("project %q の枠に空きがありません", e.Project)
-	}
 	return fmt.Sprintf("project %q の pool %q に空きがありません", e.Project, e.Pool)
 }
 
@@ -56,8 +52,7 @@ type Grant struct {
 	Name     string
 	PortBase int // poolのport帯の先頭。portの名前を持たないpoolでは0
 	Ports    []ports.Port
-	Created  bool   // 新しく借りた（同じholderの延長ではない）
-	Previous string // 譲られた枠なら、前のholder
+	Created  bool // 新しく借りた（同じholderの延長ではない）
 }
 
 func (m *Manager) ttlSeconds() int64 { return int64(m.Cfg.TTL / time.Second) }
@@ -89,58 +84,20 @@ func (m *Manager) vars(pool string, slot int, holder string, portNames []string,
 	}
 }
 
-// poolBand は、poolのport帯の先頭を返す。既定poolはprojectの帯（defaultBase）。
-// 名前つきpoolは、portの名前を持つときだけ帯を持ち、初めてなら割り当てて記録する。
-func (m *Manager) poolBand(ctx context.Context, tx *sql.Tx, p config.Pool, defaultBase int) (int, error) {
-	if p.Name == config.DefaultPool {
-		return defaultBase, nil
-	}
+// poolBand は、portの名前を持つpoolの帯を割り当てる。
+func (m *Manager) poolBand(ctx context.Context, tx *sql.Tx, p config.Pool, _ int) (int, error) {
 	if len(p.PortNames) == 0 {
 		return 0, nil
 	}
 	return store.EnsurePoolBand(ctx, tx, m.Cfg.Project, p.Name, m.Cfg.PortStart)
 }
 
-// poolLabel は、警告や失敗の文に入れるpoolの表記。既定poolでは空。
-func poolLabel(pool string) string {
-	if pool == config.DefaultPool {
-		return ""
-	}
-	return fmt.Sprintf("pool %q の", pool)
-}
-
-// Acquire は、poolの枠を借りる。
-//
-// 1つのtransactionで割り当てを決める。同じholderのpoolの枠は延長して返し（冪等）、
-// 無ければ空き枠の最も小さい番号、それも無ければ期限切れのうちexpires_atが最も古い枠を譲る。
-// どれも無ければ *NoSlotError を返す。1つのholderが持てる枠は、1poolにつき1つ。
-// transactionの外で、譲った場合は前のholderのenvでdownを、次にupを走らせる。upが失敗したらleaseを消す。
+// Acquire は、同じholderなら延長だけ行い、それ以外は全poolの期限切れを空けて最小の空き枠を貸す。
+// downとlease削除を割当と同じtransactionに置き、別processへの二重割当を防ぐ。
 func (m *Manager) Acquire(ctx context.Context, pool config.Pool) (*Grant, error) {
 	started := time.Now()
-	g, err := m.grant(ctx, pool)
-	if err != nil {
-		if _, ok := err.(*NoSlotError); ok {
-			m.record(eventlog.Event{Event: "acquire", Pool: pool.Name, Holder: m.Holder, OK: eventlog.BoolPtr(false), MS: eventlog.MS(time.Since(started)), Error: "no free slot"})
-		}
-		return nil, err
-	}
-	if !g.Created {
-		return g, nil
-	}
-	if g.Previous != "" {
-		m.record(eventlog.Event{Event: "preempt", Pool: pool.Name, Holder: m.Holder, Slot: g.Slot, PreviousHolder: g.Previous})
-		m.runDown(pool, g.Slot, g.Previous, g.PortBase)
-	}
-	if err := m.runUp(ctx, pool, g); err != nil {
-		m.record(eventlog.Event{Event: "acquire", Pool: pool.Name, Holder: m.Holder, Slot: g.Slot, OK: eventlog.BoolPtr(false), MS: eventlog.MS(time.Since(started)), Error: err.Error()})
-		return nil, fmt.Errorf("up が失敗したので枠を返しました: %w", err)
-	}
-	m.record(eventlog.Event{Event: "acquire", Pool: pool.Name, Holder: m.Holder, Slot: g.Slot, OK: eventlog.BoolPtr(true), MS: eventlog.MS(time.Since(started))})
-	return g, nil
-}
-
-func (m *Manager) grant(ctx context.Context, pool config.Pool) (*Grant, error) {
 	var g Grant
+	var noSlot *NoSlotError
 	err := m.Store.Tx(ctx, func(tx *sql.Tx) error {
 		projectBase, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Repo, m.Cfg.PortStart)
 		if err != nil {
@@ -152,26 +109,28 @@ func (m *Manager) grant(ctx context.Context, pool config.Pool) (*Grant, error) {
 		}
 		now := m.Now().Unix()
 		exp := now + m.ttlSeconds()
+		g.PortBase = base
+		own, err := store.LeaseOfHolder(ctx, tx, m.Cfg.Project, pool.Name, m.Holder)
+		if err != nil {
+			return err
+		}
+		if own != nil {
+			if err := store.ExtendLease(ctx, tx, own.Project, own.Pool, own.Slot, now, exp); err != nil {
+				return err
+			}
+			own.RenewedAt, own.ExpiresAt = now, exp
+			g.Lease = *own
+			return nil
+		}
+		// 個々のdown失敗は貸出中のまま保持し、他の空き枠を探す。
+		_, err = m.reclaimIn(ctx, tx, "acquire", now, int64(projectBase))
+		if err != nil {
+			return err
+		}
 		leases, err := store.LeasesOfPool(ctx, tx, m.Cfg.Project, pool.Name)
 		if err != nil {
 			return err
 		}
-		g = Grant{PortBase: base}
-
-		// 1. 同じholderの枠は、延長して返す。
-		for _, l := range leases {
-			if l.Holder != m.Holder {
-				continue
-			}
-			if err := store.ExtendLease(ctx, tx, l.Project, l.Pool, l.Slot, now, exp); err != nil {
-				return err
-			}
-			l.RenewedAt, l.ExpiresAt = now, exp
-			g.Lease = l
-			return nil
-		}
-
-		// 2. 空き枠の最も小さい番号。
 		taken := map[int]bool{}
 		for _, l := range leases {
 			taken[l.Slot] = true
@@ -184,33 +143,88 @@ func (m *Manager) grant(ctx context.Context, pool config.Pool) (*Grant, error) {
 			g.Created = true
 			return store.InsertLease(ctx, tx, g.Lease)
 		}
-
-		// 3. 期限切れのうち、expires_atが最も古い枠を譲る。
-		var victim *store.Lease
-		inUse := make([]store.Lease, 0, len(leases))
-		for i := range leases {
-			if leases[i].Slot > pool.Count {
-				continue
-			}
-			inUse = append(inUse, leases[i])
-			if leases[i].ExpiresAt <= now && (victim == nil || leases[i].ExpiresAt < victim.ExpiresAt) {
-				victim = &leases[i]
-			}
-		}
-		if victim == nil {
-			return &NoSlotError{Project: m.Cfg.Project, Pool: pool.Name, Leases: inUse}
-		}
-		g.Lease = store.Lease{Project: m.Cfg.Project, Pool: pool.Name, Slot: victim.Slot, Holder: m.Holder, AcquiredAt: now, RenewedAt: now, ExpiresAt: exp}
-		g.Created = true
-		g.Previous = victim.Holder
-		return store.TransferLease(ctx, tx, g.Lease)
+		noSlot = &NoSlotError{Project: m.Cfg.Project, Pool: pool.Name, Leases: leases}
+		// 掃除できた他poolのlease削除をcommitしてから空き無しを返す。
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	if noSlot != nil {
+		m.record(eventlog.Event{Event: "acquire", Pool: pool.Name, Holder: m.Holder, OK: eventlog.BoolPtr(false), MS: eventlog.MS(time.Since(started)), Error: "no free slot"})
+		return nil, noSlot
+	}
 	g.Name = m.Cfg.SlotNameIn(pool.Name, g.Slot)
 	g.Ports = ports.Assign(pool.PortNames, g.PortBase, g.Slot)
+	if !g.Created {
+		return &g, nil
+	}
+	if err := m.runUp(ctx, pool, &g); err != nil {
+		m.record(eventlog.Event{Event: "acquire", Pool: pool.Name, Holder: m.Holder, Slot: g.Slot, OK: eventlog.BoolPtr(false), MS: eventlog.MS(time.Since(started)), Error: err.Error()})
+		return nil, fmt.Errorf("up が失敗したので枠を返しました: %w", err)
+	}
+	m.record(eventlog.Event{Event: "acquire", Pool: pool.Name, Holder: m.Holder, Slot: g.Slot, OK: eventlog.BoolPtr(true), MS: eventlog.MS(time.Since(started))})
 	return &g, nil
+}
+
+// reclaimIn は、期限切れまたはreclaim_afterを超えた全poolのleaseを掃除する。
+// down失敗とDB失敗を分け、down失敗でも成功した掃除の結果をcommitする。
+func (m *Manager) reclaimIn(ctx context.Context, tx *sql.Tx, trigger string, now, projectBase int64) ([]error, error) {
+	leases, err := store.LeasesOf(ctx, tx, m.Cfg.Project)
+	if err != nil {
+		return nil, err
+	}
+	var failures []error
+	for _, l := range leases {
+		due := l.ExpiresAt <= now
+		if trigger == "reclaim" {
+			due = l.RenewedAt+int64(m.Cfg.ReclaimAfter/time.Second) <= now
+		}
+		if !due {
+			continue
+		}
+		started := time.Now()
+		p, ok := m.Cfg.Pool(l.Pool)
+		var downErr error
+		if !ok {
+			downErr = fmt.Errorf("%s のpool %q が設定に無く、downを実行できません", m.Cfg.SlotNameIn(l.Pool, l.Slot), l.Pool)
+			m.warnf("%v", downErr)
+		} else {
+			base, err := m.poolBand(ctx, tx, p, int(projectBase))
+			if err != nil {
+				return failures, err
+			}
+			downErr = m.runDown(p, l.Slot, l.Holder, base)
+		}
+		ev := eventlog.Event{Event: "reclaim", Pool: l.Pool, Holder: l.Holder, Slot: l.Slot, Trigger: trigger, OK: eventlog.BoolPtr(downErr == nil), MS: eventlog.MS(time.Since(started))}
+		if downErr != nil {
+			ev.Error = downErr.Error()
+			failures = append(failures, downErr)
+		} else {
+			if err := store.DeleteLease(ctx, tx, l); err != nil {
+				return failures, err
+			}
+		}
+		m.record(ev)
+	}
+	return failures, nil
+}
+
+// Reclaim は、最後のハートビートからreclaim_afterたった枠を全poolで空ける。
+func (m *Manager) Reclaim(ctx context.Context) error {
+	var failures []error
+	err := m.Store.Tx(ctx, func(tx *sql.Tx) error {
+		base, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Repo, m.Cfg.PortStart)
+		if err != nil {
+			return err
+		}
+		failures, err = m.reclaimIn(ctx, tx, "reclaim", m.Now().Unix(), int64(base))
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return errors.Join(failures...)
 }
 
 // runUp は、poolのupを走らせて記録する。commandが無ければ何もしない。失敗したらleaseを消す。
@@ -241,7 +255,7 @@ func (m *Manager) runDown(pool config.Pool, slot int, holder string, base int) e
 	ev := eventlog.Event{Event: "down", Pool: pool.Name, Holder: holder, Slot: slot, OK: eventlog.BoolPtr(err == nil), MS: eventlog.MS(time.Since(started))}
 	if err != nil {
 		ev.Error = err.Error()
-		m.warnf("%sslot %d のdownが失敗しました（holder %s）: %v", poolLabel(pool.Name), slot, holder, err)
+		m.warnf("%s のdownが失敗しました（holder %s）: %v", m.Cfg.SlotNameIn(pool.Name, slot), holder, err)
 	}
 	m.record(ev)
 	return err
@@ -262,17 +276,17 @@ func (m *Manager) Renew(ctx context.Context) error {
 	})
 }
 
-// Release は、holderの枠のdownを走らせて、leaseを消す。poolを指定すればそのpoolの枠、空なら全poolの枠を返す。
-// 返す枠が無ければ何もしない。どれかのdownが失敗しても、全てのleaseを消し、失敗を記録して、errorを返す。
+// Release は、指定poolまたはholderの全poolの枠を、down成功後だけ空ける。
 func (m *Manager) Release(ctx context.Context, pool string) error {
-	type target struct {
-		lease store.Lease
-		base  int
-	}
-	var targets []target
+	var failures []error
 	err := m.Store.Tx(ctx, func(tx *sql.Tx) error {
-		projectBase, found, err := store.ProjectBase(ctx, tx, m.Cfg.Project)
+		_, found, err := store.ProjectBase(ctx, tx, m.Cfg.Project)
 		if err != nil || !found {
+			return err
+		}
+		// 設定を別repositoryから使って既存leaseを止めることを防ぐ。
+		projectBase, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Repo, m.Cfg.PortStart)
+		if err != nil {
 			return err
 		}
 		leases, err := store.LeasesOfHolder(ctx, tx, m.Cfg.Project, m.Holder)
@@ -280,60 +294,46 @@ func (m *Manager) Release(ctx context.Context, pool string) error {
 			return err
 		}
 		for _, l := range leases {
-			if pool != "" && l.Pool != pool {
+			if pool != "" && pool != l.Pool {
 				continue
 			}
-			t := target{lease: l}
+			started := time.Now()
+			var downErr error
 			if p, ok := m.Cfg.Pool(l.Pool); ok {
-				if t.base, err = m.poolBand(ctx, tx, p, projectBase); err != nil {
+				base, err := m.poolBand(ctx, tx, p, projectBase)
+				if err != nil {
+					return err
+				}
+				downErr = m.runDown(p, l.Slot, l.Holder, base)
+			} else {
+				downErr = fmt.Errorf("%s のpool %q が設定に無く、downを実行できません", m.Cfg.SlotNameIn(l.Pool, l.Slot), l.Pool)
+				m.warnf("%v", downErr)
+			}
+			ev := eventlog.Event{Event: "release", Pool: l.Pool, Holder: l.Holder, Slot: l.Slot, OK: eventlog.BoolPtr(downErr == nil), MS: eventlog.MS(time.Since(started))}
+			if downErr != nil {
+				ev.Error = downErr.Error()
+				failures = append(failures, downErr)
+			} else {
+				if err := store.DeleteLease(ctx, tx, l); err != nil {
 					return err
 				}
 			}
-			targets = append(targets, t)
+			m.record(ev)
 		}
 		return nil
 	})
-	if err != nil || len(targets) == 0 {
+	if err != nil {
 		return err
 	}
-	// 既定pool、続いて名前つきpoolの名前順に返す。
-	sort.SliceStable(targets, func(i, j int) bool {
-		a, b := targets[i].lease.Pool, targets[j].lease.Pool
-		if (a == config.DefaultPool) != (b == config.DefaultPool) {
-			return a == config.DefaultPool
-		}
-		return a < b
-	})
-
-	var errs []error
-	for _, t := range targets {
-		started := time.Now()
-		var downErr error
-		if p, ok := m.Cfg.Pool(t.lease.Pool); ok {
-			downErr = m.runDown(p, t.lease.Slot, m.Holder, t.base)
-		} else {
-			m.warnf("pool %q は設定に無いので、downを走らせずに枠を返します", t.lease.Pool)
-		}
-		m.dropLease(ctx, t.lease)
-		ev := eventlog.Event{Event: "release", Pool: t.lease.Pool, Holder: m.Holder, Slot: t.lease.Slot, OK: eventlog.BoolPtr(downErr == nil), MS: eventlog.MS(time.Since(started))}
-		if downErr != nil {
-			ev.Error = downErr.Error()
-		}
-		m.record(ev)
-		if downErr != nil {
-			errs = append(errs, fmt.Errorf("%sdown が失敗しました（枠は返しました）: %w", poolLabel(t.lease.Pool), downErr))
-		}
-	}
-	return errors.Join(errs...)
+	return errors.Join(failures...)
 }
 
 // State は、枠の状態である。
 type State string
 
 const (
-	Lent    State = "lent"
-	Expired State = "expired"
-	Free    State = "free"
+	Lent State = "lent"
+	Free State = "free"
 )
 
 // SlotStatus は、1つの枠の状態である。
@@ -347,7 +347,7 @@ type SlotStatus struct {
 	Ports     []ports.Port
 }
 
-// Status は、projectの全poolの全枠の状態を、既定pool、続いて名前つきpoolの名前順で返す。
+// Status は、projectの全poolの全枠の状態を、poolの名前順で返す。
 func (m *Manager) Status(ctx context.Context) ([]SlotStatus, error) {
 	pools := m.Cfg.Pools()
 	bases := make([]int, len(pools))
@@ -368,7 +368,6 @@ func (m *Manager) Status(ctx context.Context) ([]SlotStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	now := m.Now().Unix()
 	type key struct {
 		pool string
 		slot int
@@ -383,9 +382,6 @@ func (m *Manager) Status(ctx context.Context) ([]SlotStatus, error) {
 			st := SlotStatus{Pool: p.Name, Slot: slot, Name: m.Cfg.SlotNameIn(p.Name, slot), State: Free, Ports: ports.Assign(p.PortNames, bases[i], slot)}
 			if l, ok := byKey[key{p.Name, slot}]; ok {
 				st.State = Lent
-				if l.ExpiresAt <= now {
-					st.State = Expired
-				}
 				st.Holder, st.ExpiresAt = l.Holder, l.ExpiresAt
 			}
 			out = append(out, st)

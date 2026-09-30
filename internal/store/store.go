@@ -12,7 +12,6 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/taknya/slotctl/internal/config"
 	"github.com/taknya/slotctl/internal/ports"
 )
 
@@ -23,7 +22,7 @@ const DBName = "state.db"
 // 1はv0.1.0（leaseが(project, slot)で決まる）。2はpoolを持つ。
 const schemaVersion = 2
 
-// projects.port_baseは、既定poolのport帯の先頭。名前つきpoolの帯はpool_bandsにある。
+// projects.port_baseはprojectの最初のpool用に確保する帯。各poolの帯はpool_bandsに記録する。
 const schemaSQL = `
 CREATE TABLE projects (
 	name TEXT PRIMARY KEY,
@@ -67,7 +66,7 @@ CREATE TABLE leases_v2 (
 	PRIMARY KEY (project, pool, slot)
 );
 INSERT INTO leases_v2(project, pool, slot, holder, acquired_at, renewed_at, expires_at)
-	SELECT project, '` + config.DefaultPool + `', slot, holder, acquired_at, renewed_at, expires_at FROM leases;
+	SELECT project, 'default', slot, holder, acquired_at, renewed_at, expires_at FROM leases;
 DROP TABLE leases;
 ALTER TABLE leases_v2 RENAME TO leases;
 `
@@ -192,7 +191,7 @@ func EnsureProject(ctx context.Context, tx *sql.Tx, name, repo string, portStart
 	return base, nil
 }
 
-// allocateBand は、machineで使われていない帯（projectの既定poolと名前つきpoolの全て）の先頭を、portStartから1000ずつ探して返す。
+// allocateBand は、projectの予約と全poolを含め、machineで空いている帯を探す。
 func allocateBand(ctx context.Context, tx *sql.Tx, portStart int) (int, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT port_base FROM projects UNION SELECT port_base FROM pool_bands`)
 	if err != nil {
@@ -222,7 +221,7 @@ func allocateBand(ctx context.Context, tx *sql.Tx, portStart int) (int, error) {
 	return base, nil
 }
 
-// EnsurePoolBand は、名前つきpoolのport帯の先頭を返す。初めてなら、machineで空いている帯を割り当てて記録する。
+// EnsurePoolBand は、poolの帯を返す。最初のpoolにはprojectの予約、以降は空いている帯を記録する。
 func EnsurePoolBand(ctx context.Context, tx *sql.Tx, project, pool string, portStart int) (int, error) {
 	var base int
 	err := tx.QueryRowContext(ctx, `SELECT port_base FROM pool_bands WHERE project = ? AND pool = ?`, project, pool).Scan(&base)
@@ -232,7 +231,20 @@ func EnsurePoolBand(ctx context.Context, tx *sql.Tx, project, pool string, portS
 	if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	if base, err = allocateBand(ctx, tx, portStart); err != nil {
+	var projectBase int
+	if err := tx.QueryRowContext(ctx, `SELECT port_base FROM projects WHERE name = ?`, project).Scan(&projectBase); err != nil {
+		return 0, err
+	}
+	var used int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pool_bands WHERE port_base = ?`, projectBase).Scan(&used); err != nil {
+		return 0, err
+	}
+	base = projectBase
+	err = nil
+	if used > 0 {
+		base, err = allocateBand(ctx, tx, portStart)
+	}
+	if err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO pool_bands(project, pool, port_base) VALUES (?, ?, ?)`, project, pool, base); err != nil {
@@ -319,7 +331,7 @@ func TransferLease(ctx context.Context, tx *sql.Tx, l Lease) error {
 	return err
 }
 
-// ExtendLease は、枠のleaseの生存連絡と期限を更新する。
+// ExtendLease は、枠のleaseのハートビートと期限を更新する。
 func ExtendLease(ctx context.Context, tx *sql.Tx, project, pool string, slot int, renewedAt, expiresAt int64) error {
 	_, err := tx.ExecContext(ctx, `UPDATE leases SET renewed_at = ?, expires_at = ? WHERE project = ? AND pool = ? AND slot = ?`,
 		renewedAt, expiresAt, project, pool, slot)

@@ -18,7 +18,7 @@ func TestAcquireRotatesEventsByConfiguredRetention(t *testing.T) {
 	for _, n := range []string{"events-2026-06.jsonl", "events-2026-07.jsonl", "events-2026-08.jsonl"} {
 		writeFile(t, filepath.Join(e.home, n), "{}\n")
 	}
-	root := e.project("project = \"demo\"\n")
+	root := e.project("project = \"demo\"\n[pools.dev]\n")
 	mustAcquire(t, e, root)
 	if exists(e.home, "events-2026-06.jsonl") || exists(e.home, "events-2026-07.jsonl") {
 		t.Error("2か月より古い記録が残っています")
@@ -31,7 +31,7 @@ func TestAcquireRotatesEventsByConfiguredRetention(t *testing.T) {
 // renewは記録を書かない。acquire・release・up・downは書く。
 func TestEventsRecordedPerCommand(t *testing.T) {
 	e := newTestEnv(t)
-	root := e.project("project = \"demo\"\n[commands]\nup = \"true\"\ndown = \"true\"\n")
+	root := e.project("project = \"demo\"\n[pools.dev]\nup = \"true\"\ndown = \"true\"\n")
 	mustAcquire(t, e, root)
 	e.run(root, "renew")
 	e.run(root, "release")

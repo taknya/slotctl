@@ -49,9 +49,10 @@ func usagef(format string, args ...any) error {
 const usageText = `使い方: slotctl <命令> [option]
 
 命令:
-  acquire [pool] [--json]  poolの枠を借りる（poolを省くと既定のpool。同じholderなら期限を延ばして同じ枠を返す）
+  acquire <pool> [--json]  poolの枠を借りる（同じholderなら期限を延ばして同じ枠を返す）
   renew                    holderの全poolの枠の期限を延ばす（commandは走らせない）
   release [pool]           holderのpoolの枠のdownを走らせて返す（poolを省くと全poolの枠）
+  reclaim                  projectの全poolでハートビートが途絶えた枠を空ける
   status [--json]          projectの全poolの全枠の状態を出す
 
 終了code: 0=成功 1=その他の失敗 2=使い方の誤り 3=空きが無い
@@ -72,6 +73,8 @@ func (a *App) Run(args []string) int {
 		err = a.renew(rest)
 	case "release":
 		err = a.release(rest)
+	case "reclaim":
+		err = a.reclaim(rest)
 	case "status":
 		err = a.status(rest)
 	case "help", "-h", "--help":
@@ -186,12 +189,12 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-// pool は、位置引数のpool名（無ければ既定pool）の設定を返す。無いpoolは使い方の誤り。
+// pool は、必須の位置引数のpool名の設定を返す。無いpoolは使い方の誤り。
 func (s *session) pool(pos []string) (config.Pool, error) {
-	name := config.DefaultPool
-	if len(pos) > 0 {
-		name = pos[0]
+	if len(pos) != 1 {
+		return config.Pool{}, usagef("acquire <pool> はpoolを指定してください")
 	}
+	name := pos[0]
 	p, ok := s.cfg.Pool(name)
 	if !ok {
 		return config.Pool{}, s.unknownPool(name)
@@ -209,20 +212,22 @@ func (s *session) unknownPool(name string) error {
 
 // AcquireResult は、acquire --json の出力である。
 type AcquireResult struct {
-	Project        string         `json:"project"`
-	Pool           string         `json:"pool"`
-	Slot           int            `json:"slot"`
-	Name           string         `json:"name"`
-	Holder         string         `json:"holder"`
-	Ports          map[string]int `json:"ports"`
-	ExpiresAt      string         `json:"expires_at"`
-	PreviousHolder string         `json:"previous_holder,omitempty"`
+	Project   string         `json:"project"`
+	Pool      string         `json:"pool"`
+	Slot      int            `json:"slot"`
+	Name      string         `json:"name"`
+	Holder    string         `json:"holder"`
+	Ports     map[string]int `json:"ports"`
+	ExpiresAt string         `json:"expires_at"`
 }
 
 func (a *App) acquire(args []string) error {
 	asJSON, pos, err := a.parse("acquire", args, true, 1)
 	if err != nil {
 		return err
+	}
+	if len(pos) == 0 {
+		return usagef("acquire <pool> はpoolを指定してください")
 	}
 	s, err := a.open()
 	if err != nil {
@@ -243,14 +248,13 @@ func (a *App) acquire(args []string) error {
 		return err
 	}
 	res := AcquireResult{
-		Project:        s.cfg.Project,
-		Pool:           pool.Name,
-		Slot:           g.Slot,
-		Name:           g.Name,
-		Holder:         g.Holder,
-		Ports:          ports.Map(g.Ports),
-		ExpiresAt:      a.formatTime(g.ExpiresAt),
-		PreviousHolder: g.Previous,
+		Project:   s.cfg.Project,
+		Pool:      pool.Name,
+		Slot:      g.Slot,
+		Name:      g.Name,
+		Holder:    g.Holder,
+		Ports:     ports.Map(g.Ports),
+		ExpiresAt: a.formatTime(g.ExpiresAt),
 	}
 	if asJSON {
 		return writeJSON(a.Stdout, res)
@@ -305,6 +309,21 @@ func (a *App) renew(args []string) error {
 	}
 	defer s.close()
 	return s.mgr.Renew(context.Background())
+}
+
+func (a *App) reclaim(args []string) error {
+	if _, _, err := a.parse("reclaim", args, false, 0); err != nil {
+		return err
+	}
+	s, err := a.open()
+	if err != nil {
+		if errors.Is(err, config.ErrNoProjectFile) {
+			return nil
+		}
+		return err
+	}
+	defer s.close()
+	return s.mgr.Reclaim(context.Background())
 }
 
 func (a *App) release(args []string) error {

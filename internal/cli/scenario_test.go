@@ -11,7 +11,7 @@ import (
 // AC-5: 設定の解決とportの割り当てが仕様どおり。
 func TestConfigFoundFromSubdirectory(t *testing.T) {
 	e := newTestEnv(t)
-	root := e.project("project = \"demo\"\n[slots]\ncount = 2\n")
+	root := e.project("project = \"demo\"\n[pools.dev]\ncount = 2\n")
 	deep := holderDir(t, root, "x/y/z")
 	res := mustAcquire(t, e, deep)
 	if res.Project != "demo" || res.Slot != 1 || res.Holder != deep {
@@ -21,10 +21,10 @@ func TestConfigFoundFromSubdirectory(t *testing.T) {
 
 func TestMachineConfigOverridesSlots(t *testing.T) {
 	e := newTestEnv(t)
-	writeFile(t, filepath.Join(e.home, "config.toml"), "[projects.demo]\nslots = 1\n")
-	root := e.project("project = \"demo\"\n[slots]\ncount = 3\n")
+	writeFile(t, filepath.Join(e.home, "config.toml"), "[projects.demo.pools.dev]\nslots = 1\n")
+	root := e.project("project = \"demo\"\n[pools.dev]\ncount = 3\n")
 	mustAcquire(t, e, holderDir(t, root, "a"))
-	if code, _, _ := e.run(holderDir(t, root, "b"), "acquire"); code != 3 {
+	if code, _, _ := e.run(holderDir(t, root, "b"), "acquire", "dev"); code != 3 {
 		t.Fatalf("machine設定のslots=1で2人目は空き無しのはず: %d", code)
 	}
 	if st := mustStatus(t, e, root); len(st.Slots) != 1 {
@@ -35,7 +35,7 @@ func TestMachineConfigOverridesSlots(t *testing.T) {
 func TestPortBandsDoNotOverlap(t *testing.T) {
 	e := newTestEnv(t)
 	toml := func(name string) string {
-		return "project = \"" + name + "\"\n[slots]\ncount = 10\n[ports]\nnames = [\"web\", \"db\"]\n"
+		return "project = \"" + name + "\"\n[pools.dev]\ncount = 10\nports = [\"web\", \"db\"]\n"
 	}
 	one := e.project(toml("one"))
 	two := e.project(toml("two"))
@@ -67,7 +67,7 @@ func TestPortBandsDoNotOverlap(t *testing.T) {
 func TestPortStartFromMachineConfig(t *testing.T) {
 	e := newTestEnv(t)
 	writeFile(t, filepath.Join(e.home, "config.toml"), "port_start = 20000\n")
-	root := e.project("project = \"demo\"\n[ports]\nnames = [\"web\"]\n")
+	root := e.project("project = \"demo\"\n[pools.dev]\nports = [\"web\"]\n")
 	if res := mustAcquire(t, e, root); res.Ports["web"] != 20000 {
 		t.Fatalf("port_start: %+v", res.Ports)
 	}
@@ -75,10 +75,10 @@ func TestPortStartFromMachineConfig(t *testing.T) {
 
 func TestSameProjectNameFromAnotherRepositoryIsRejected(t *testing.T) {
 	e := newTestEnv(t)
-	first := e.project("project = \"demo\"\n")
-	other := e.project("project = \"demo\"\n")
+	first := e.project("project = \"demo\"\n[pools.dev]\n")
+	other := e.project("project = \"demo\"\n[pools.dev]\n")
 	mustAcquire(t, e, first)
-	code, _, errs := e.run(other, "acquire")
+	code, _, errs := e.run(other, "acquire", "dev")
 	if code != 1 || !strings.Contains(errs, "別のrepository") {
 		t.Fatalf("別repositoryの同名projectは拒むはず: code=%d %s", code, errs)
 	}
@@ -93,13 +93,13 @@ func TestInvalidConfigIsRejected(t *testing.T) {
 	e := newTestEnv(t)
 	for name, toml := range map[string]string{
 		"未知のkey":        "project = \"demo\"\nbogus = 1\n",
-		"projectが無い":    "[slots]\ncount = 1\n",
+		"projectが無い":    "[pools.dev]\ncount = 1\n",
 		"ttlが不正":        "project = \"demo\"\n[lease]\nttl = \"abc\"\n",
-		"枠が多すぎる":        "project = \"demo\"\n[slots]\ncount = 11\n",
-		"port名が大文字で重なる": "project = \"demo\"\n[ports]\nnames = [\"web\", \"WEB\"]\n",
+		"枠が多すぎる":        "project = \"demo\"\n[pools.dev]\ncount = 11\n",
+		"port名が大文字で重なる": "project = \"demo\"\nports = [\"web\", \"WEB\"]\n",
 	} {
 		root := e.project(toml)
-		if code, _, _ := e.run(root, "acquire"); code != 1 {
+		if code, _, _ := e.run(root, "acquire", "dev"); code != 1 {
 			t.Errorf("%s: 終了code got %d want 1", name, code)
 		}
 	}
@@ -126,7 +126,7 @@ func TestGitWorktreesAreDistinctHoldersOfOneRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	git(repo, "init", "-q")
-	writeFile(t, filepath.Join(repo, "slotctl.toml"), "project = \"demo\"\n[slots]\ncount = 3\n")
+	writeFile(t, filepath.Join(repo, "slotctl.toml"), "project = \"demo\"\n[pools.dev]\ncount = 3\n")
 	git(repo, "add", "slotctl.toml")
 	git(repo, "commit", "-q", "-m", "init")
 	wt := filepath.Join(base, "wt")
