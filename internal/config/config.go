@@ -25,7 +25,6 @@ const (
 	defaultTTL       = 10 * time.Minute
 	defaultPortStart = 12000
 	defaultRetention = 3
-	defaultSlotCount = 1
 )
 
 var (
@@ -48,7 +47,6 @@ type projectFile struct {
 
 // poolFile は、名前つきpool（[pools.<名前>]）の設定である。
 type poolFile struct {
-	Count int      `toml:"count"`
 	Up    string   `toml:"up"`
 	Down  string   `toml:"down"`
 	Ports []string `toml:"ports"`
@@ -71,11 +69,12 @@ type machineFile struct {
 
 // Pool は、枠の種類（pool）の設定である。
 type Pool struct {
-	Name      string
-	Count     int
-	PortNames []string
-	Up        string
-	Down      string
+	Name              string
+	OperationsDefined bool
+	Count             int
+	PortNames         []string
+	Up                string
+	Down              string
 }
 
 // Config は、projectとmachineの設定を合わせた実行時の設定である。
@@ -89,6 +88,7 @@ type Config struct {
 	PortStart          int
 	LogRetentionMonths int
 	StateDir           string
+	MachinePath        string
 }
 
 // SlotNameIn は、poolの枠の名前を返す。
@@ -164,6 +164,11 @@ func Load(getenv func(string) string, cwd string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	for name := range pf.Pools {
+		if md.IsDefined("pools", name, "count") {
+			return nil, fmt.Errorf("%s: count は書けません。数はmachineの設定 %s の [projects.%s.pools.%s] slots に書いてください", path, filepath.Join(configDir, MachineFileName), pf.Project, name)
+		}
+	}
 	if u := md.Undecoded(); len(u) > 0 {
 		return nil, fmt.Errorf("%s: 未知の設定 %v", path, u)
 	}
@@ -193,6 +198,7 @@ func Load(getenv func(string) string, cwd string) (*Config, error) {
 		PortStart:          mf.PortStart,
 		LogRetentionMonths: mf.LogRetentionMonths,
 		StateDir:           stateDir,
+		MachinePath:        mpath,
 	}
 	if pf.Lease.TTL != "" {
 		if cfg.TTL, err = time.ParseDuration(pf.Lease.TTL); err != nil {
@@ -210,35 +216,38 @@ func Load(getenv func(string) string, cwd string) (*Config, error) {
 	if cfg.ReclaimAfter < time.Second {
 		return nil, fmt.Errorf("%s: lease.reclaim_after は1秒以上にしてください", path)
 	}
-	names := make([]string, 0, len(pf.Pools))
-	for name := range pf.Pools {
-		names = append(names, name)
+	for project, mp := range mf.Projects {
+		if !projectNamePattern.MatchString(project) {
+			return nil, fmt.Errorf("%s: project の名前が不正です（%q）", mpath, project)
+		}
+		for name, p := range mp.Pools {
+			if !poolNamePattern.MatchString(name) {
+				return nil, fmt.Errorf("%s: pool の名前が不正です（%q）", mpath, name)
+			}
+			if p.Slots < 1 || p.Slots > ports.MaxSlots {
+				return nil, fmt.Errorf("%s: [projects.%s.pools.%s] slots は1以上%d以下の整数で必ず書いてください（%d）", mpath, project, name, ports.MaxSlots, p.Slots)
+			}
+		}
 	}
-	sort.Strings(names)
-	for _, name := range names {
+	mp := mf.Projects[cfg.Project]
+	names := map[string]bool{}
+	for name := range pf.Pools {
 		if !poolNamePattern.MatchString(name) {
 			return nil, fmt.Errorf("%s: pool の名前は小文字・数字・- で、小文字から始めてください（%q）", path, name)
 		}
-		p := pf.Pools[name]
-		cfg.Named = append(cfg.Named, Pool{Name: name, Count: p.Count, PortNames: p.Ports, Up: p.Up, Down: p.Down})
+		names[name] = true
 	}
-	for i := range cfg.Named {
-		if cfg.Named[i].Count == 0 {
-			cfg.Named[i].Count = defaultSlotCount
-		}
+	for name := range mp.Pools {
+		names[name] = true
 	}
-	if mp, ok := mf.Projects[cfg.Project]; ok {
-		// slotctl.tomlに無いpoolの上書きは無視する（projectの設定が版ごとに違っても、命令を止めない）。
-		for i := range cfg.Named {
-			if mpool, ok := mp.Pools[cfg.Named[i].Name]; ok && mpool.Slots != 0 {
-				cfg.Named[i].Count = mpool.Slots
-			}
-		}
-		cfg.Env = make(map[string]string, len(mp.Env))
-		home := getenv("HOME")
-		for k, v := range mp.Env {
-			cfg.Env[k] = expandHome(v, home)
-		}
+	for name := range names {
+		p, defined := pf.Pools[name]
+		cfg.Named = append(cfg.Named, Pool{Name: name, Count: mp.Pools[name].Slots, OperationsDefined: defined, PortNames: p.Ports, Up: p.Up, Down: p.Down})
+	}
+	sort.Slice(cfg.Named, func(i, j int) bool { return cfg.Named[i].Name < cfg.Named[j].Name })
+	cfg.Env = make(map[string]string, len(mp.Env))
+	for k, v := range mp.Env {
+		cfg.Env[k] = expandHome(v, getenv("HOME"))
 	}
 	for _, p := range cfg.Pools() {
 		if err := validatePool(p); err != nil {
@@ -260,13 +269,9 @@ func Load(getenv func(string) string, cwd string) (*Config, error) {
 	return cfg, nil
 }
 
-// validatePool は、poolの枠の数とportの名前を確かめる。
+// validatePool は、repositoryの操作が使うportの名前を確かめる。
 func validatePool(p Pool) error {
-	label := fmt.Sprintf("pool %q の", p.Name)
 	portsKey := fmt.Sprintf("pools.%s.ports", p.Name)
-	if p.Count < 1 || p.Count > ports.MaxSlots {
-		return fmt.Errorf("%s枠の数は1以上%d以下にしてください（%d）", label, ports.MaxSlots, p.Count)
-	}
 	if len(p.PortNames) > ports.PerSlot {
 		return fmt.Errorf("%s は%d個以下にしてください", portsKey, ports.PerSlot)
 	}

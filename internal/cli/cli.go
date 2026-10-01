@@ -196,8 +196,11 @@ func (s *session) pool(pos []string) (config.Pool, error) {
 	}
 	name := pos[0]
 	p, ok := s.cfg.Pool(name)
-	if !ok {
+	if !ok || !p.OperationsDefined {
 		return config.Pool{}, s.unknownPool(name)
+	}
+	if p.Count == 0 {
+		return config.Pool{}, fmt.Errorf("machineの設定 %s の [projects.%s.pools.%s] slots に枠の数を書いてください", s.cfg.MachinePath, s.cfg.Project, name)
 	}
 	return p, nil
 }
@@ -205,7 +208,9 @@ func (s *session) pool(pos []string) (config.Pool, error) {
 func (s *session) unknownPool(name string) error {
 	var names []string
 	for _, p := range s.cfg.Pools() {
-		names = append(names, p.Name)
+		if p.OperationsDefined {
+			names = append(names, p.Name)
+		}
 	}
 	return usagef("未知のpool %q です（設定にあるpool: %s）", name, strings.Join(names, "・"))
 }
@@ -341,7 +346,7 @@ func (a *App) release(args []string) error {
 	defer s.close()
 	pool := ""
 	if len(pos) > 0 {
-		if _, ok := s.cfg.Pool(pos[0]); !ok {
+		if p, ok := s.cfg.Pool(pos[0]); !ok || !p.OperationsDefined {
 			return s.unknownPool(pos[0])
 		}
 		pool = pos[0]
@@ -350,13 +355,14 @@ func (a *App) release(args []string) error {
 }
 
 type statusSlot struct {
-	Pool      string         `json:"pool"`
-	Slot      int            `json:"slot"`
-	Name      string         `json:"name"`
-	State     lease.State    `json:"state"`
-	Holder    string         `json:"holder,omitempty"`
-	ExpiresAt string         `json:"expires_at,omitempty"`
-	Ports     map[string]int `json:"ports"`
+	OperationsDefined bool           `json:"operations_defined"`
+	Pool              string         `json:"pool"`
+	Slot              int            `json:"slot"`
+	Name              string         `json:"name"`
+	State             lease.State    `json:"state"`
+	Holder            string         `json:"holder,omitempty"`
+	ExpiresAt         string         `json:"expires_at,omitempty"`
+	Ports             map[string]int `json:"ports"`
 }
 
 func (a *App) status(args []string) error {
@@ -377,7 +383,7 @@ func (a *App) status(args []string) error {
 	if asJSON {
 		out := make([]statusSlot, len(slots))
 		for i, st := range slots {
-			out[i] = statusSlot{Pool: st.Pool, Slot: st.Slot, Name: st.Name, State: st.State, Holder: st.Holder, Ports: ports.Map(st.Ports)}
+			out[i] = statusSlot{Pool: st.Pool, Slot: st.Slot, Name: st.Name, State: st.State, Holder: st.Holder, Ports: ports.Map(st.Ports), OperationsDefined: st.OperationsDefined}
 			if st.State != lease.Free {
 				out[i].ExpiresAt = a.formatTime(st.ExpiresAt)
 			}
@@ -388,13 +394,17 @@ func (a *App) status(args []string) error {
 		}{s.cfg.Project, out})
 	}
 	tw := tabwriter.NewWriter(a.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "POOL\tSLOT\tNAME\tSTATE\tHOLDER\tEXPIRES\tPORT")
+	fmt.Fprintln(tw, "POOL\tSLOT\tNAME\tSTATE\tHOLDER\tEXPIRES\tPORT\tOPERATIONS")
 	for _, st := range slots {
 		holder, exp := "-", "-"
 		if st.State != lease.Free {
 			holder, exp = st.Holder, a.formatTime(st.ExpiresAt)
 		}
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\n", st.Pool, st.Slot, st.Name, st.State, holder, exp, portList(st.Ports))
+		operations := "定義済み"
+		if !st.OperationsDefined {
+			operations = "未定義（downなし）"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", st.Pool, st.Slot, st.Name, st.State, holder, exp, portList(st.Ports), operations)
 	}
 	return tw.Flush()
 }

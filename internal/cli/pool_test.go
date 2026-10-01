@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -104,10 +105,9 @@ func TestExplicitDevPoolKeepsOutputFields(t *testing.T) {
 	root := e.project(fmt.Sprintf(`
 project = "demo"
 [pools.dev]
-count = 2
 ports = ["web", "db"]
 up = 'echo "$SLOTCTL_NAME $SLOTCTL_SLOT $SLOTCTL_PORT_WEB $SLOTCTL_PORT_DB $SLOTCTL_POOL" >> %s'
-`, logFile))
+`, logFile), map[string]int{"dev": 2})
 	a := holderDir(t, root, "a")
 
 	code, out, errs := e.run(a, "acquire", "dev")
@@ -142,10 +142,10 @@ up = 'echo "$SLOTCTL_NAME $SLOTCTL_SLOT $SLOTCTL_PORT_WEB $SLOTCTL_PORT_DB $SLOT
 		sort.Strings(ks)
 		return ks
 	}
-	if got, want := keys(st.Slots[0]), []string{"expires_at", "holder", "name", "pool", "ports", "slot", "state"}; !reflect.DeepEqual(got, want) {
+	if got, want := keys(st.Slots[0]), []string{"expires_at", "holder", "name", "operations_defined", "pool", "ports", "slot", "state"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("lentの項目: got %v want %v", got, want)
 	}
-	if got, want := keys(st.Slots[1]), []string{"name", "pool", "ports", "slot", "state"}; !reflect.DeepEqual(got, want) {
+	if got, want := keys(st.Slots[1]), []string{"name", "operations_defined", "pool", "ports", "slot", "state"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("freeの項目: got %v want %v", got, want)
 	}
 	if st.Slots[0]["pool"] != "dev" || st.Slots[0]["name"] != "demo-dev-1" || st.Slots[0]["state"] != "lent" ||
@@ -162,11 +162,9 @@ project = "demo"
 [lease]
 ttl = "10m"
 [pools.dev]
-count = 2
 up = 'echo "up dev $SLOTCTL_HOLDER $SLOTCTL_SLOT" >> %[1]s'
 down = 'echo "down dev $SLOTCTL_HOLDER $SLOTCTL_SLOT" >> %[1]s'
 [pools.billing]
-count = 1
 up = 'echo "up billing $SLOTCTL_HOLDER $SLOTCTL_SLOT $SLOTCTL_POOL" >> %[1]s'
 down = 'echo "down billing $SLOTCTL_HOLDER $SLOTCTL_SLOT $SLOTCTL_POOL" >> %[1]s'
 `
@@ -175,7 +173,7 @@ down = 'echo "down billing $SLOTCTL_HOLDER $SLOTCTL_SLOT $SLOTCTL_POOL" >> %[1]s
 func TestSameHolderHoldsSlotsInDifferentPools(t *testing.T) {
 	e := newTestEnv(t)
 	logFile := filepath.Join(t.TempDir(), "log")
-	root := e.project(fmt.Sprintf(twoPoolTOML, logFile))
+	root := e.project(fmt.Sprintf(twoPoolTOML, logFile), map[string]int{"dev": 2, "billing": 1})
 	a := holderDir(t, root, "a")
 
 	d := acquirePool(t, e, a)
@@ -211,7 +209,7 @@ func TestSameHolderHoldsSlotsInDifferentPools(t *testing.T) {
 func TestAcquireReclaimsExpiredAcrossPools(t *testing.T) {
 	e := newTestEnv(t)
 	log := filepath.Join(t.TempDir(), "log")
-	root := e.project(fmt.Sprintf(twoPoolTOML, log))
+	root := e.project(fmt.Sprintf(twoPoolTOML, log), map[string]int{"dev": 2, "billing": 1})
 	a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
 	acquirePool(t, e, a)
 	acquirePool(t, e, a, "billing")
@@ -239,7 +237,7 @@ func TestAcquireReclaimsExpiredAcrossPools(t *testing.T) {
 
 func TestUnknownPoolIsUsageError(t *testing.T) {
 	e := newTestEnv(t)
-	root := e.project(fmt.Sprintf(twoPoolTOML, filepath.Join(t.TempDir(), "log")))
+	root := e.project(fmt.Sprintf(twoPoolTOML, filepath.Join(t.TempDir(), "log")), map[string]int{"dev": 2, "billing": 1})
 	a := holderDir(t, root, "a")
 	for _, args := range [][]string{
 		{"acquire", "nope"},
@@ -263,20 +261,20 @@ func TestUnknownPoolIsUsageError(t *testing.T) {
 
 // AC-2 (e): poolの設定の誤り。
 func TestInvalidPoolConfigIsRejected(t *testing.T) {
-	e := newTestEnv(t)
 	for name, toml := range map[string]string{
-		"旧slotsは誤り":          "project = \"demo\"\n[slots]\ncount = 1\n",
-		"pool名が大文字":          "project = \"demo\"\n[pools.Billing]\ncount = 1\n",
-		"pool名が数字で始まる":       "project = \"demo\"\n[pools.\"1x\"]\ncount = 1\n",
-		"pool名に使えない文字":       "project = \"demo\"\n[pools.a_b]\ncount = 1\n",
-		"pool名が空":            "project = \"demo\"\n[pools.\"\"]\ncount = 1\n",
-		"poolの未知のkey":        "project = \"demo\"\n[pools.billing]\ncount = 1\nbogus = 1\n",
-		"poolの枠が多すぎる":        "project = \"demo\"\n[pools.billing]\ncount = 11\n",
-		"poolの枠が負":           "project = \"demo\"\n[pools.billing]\ncount = -1\n",
-		"poolのport名が大文字で重なる": "project = \"demo\"\n[pools.billing]\nports = [\"a\", \"A\"]\n",
-		"poolのport名に使えない文字":  "project = \"demo\"\n[pools.billing]\nports = [\"a-b\"]\n",
-		"pools直下の未知のkey":     "project = \"demo\"\n[pools]\nbogus = 1\n",
+		"旧slotsは誤り":             "project = \"demo\"\n[slots]\ncount = 1\n",
+		"pool名が大文字":             "project = \"demo\"\n[pools.Billing]\n",
+		"pool名が数字で始まる":          "project = \"demo\"\n[pools.\"1x\"]\n",
+		"pool名に使えない文字":          "project = \"demo\"\n[pools.a_b]\n",
+		"pool名が空":               "project = \"demo\"\n[pools.\"\"]\n",
+		"poolの未知のkey":           "project = \"demo\"\n[pools.billing]\nbogus = 1\n",
+		"repositoryのcountは誤り":   "project = \"demo\"\n[pools.billing]\ncount = 11\n",
+		"repositoryの負のcountは誤り": "project = \"demo\"\n[pools.billing]\ncount = -1\n",
+		"poolのport名が大文字で重なる":    "project = \"demo\"\n[pools.billing]\nports = [\"a\", \"A\"]\n",
+		"poolのport名に使えない文字":     "project = \"demo\"\n[pools.billing]\nports = [\"a-b\"]\n",
+		"pools直下の未知のkey":        "project = \"demo\"\n[pools]\nbogus = 1\n",
 	} {
+		e := newTestEnv(t)
 		root := e.project(toml)
 		for _, cmd := range []string{"acquire", "status"} {
 			args := []string{cmd}
@@ -294,7 +292,7 @@ func TestInvalidPoolConfigIsRejected(t *testing.T) {
 func TestRenewExtendsEveryPool(t *testing.T) {
 	e := newTestEnv(t)
 	logFile := filepath.Join(t.TempDir(), "log")
-	root := e.project(fmt.Sprintf(twoPoolTOML, logFile))
+	root := e.project(fmt.Sprintf(twoPoolTOML, logFile), map[string]int{"dev": 2, "billing": 1})
 	a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
 	acquirePool(t, e, a)
 	acquirePool(t, e, a, "billing")
@@ -327,7 +325,7 @@ func TestRenewExtendsEveryPool(t *testing.T) {
 func TestReleaseOnePoolOrAllPools(t *testing.T) {
 	e := newTestEnv(t)
 	logFile := filepath.Join(t.TempDir(), "log")
-	root := e.project(fmt.Sprintf(twoPoolTOML, logFile))
+	root := e.project(fmt.Sprintf(twoPoolTOML, logFile), map[string]int{"dev": 2, "billing": 1})
 	a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
 	acquirePool(t, e, a)
 	acquirePool(t, e, a, "billing")
@@ -384,11 +382,10 @@ func TestReleaseKeepsFailedLeaseAndReleasesOtherPools(t *testing.T) {
 			root := e.project(fmt.Sprintf(`
 project = "demo"
 [pools.dev]
-count = 1
 down = 'echo "down dev" >> %[1]s; [ %[2]s != dev ]'
 [pools.billing]
 down = 'echo "down billing" >> %[1]s; [ %[2]s != billing ]'
-`, logFile, failing))
+`, logFile, failing), map[string]int{"dev": 1})
 			a := holderDir(t, root, "a")
 			acquirePool(t, e, a)
 			acquirePool(t, e, a, "billing")
@@ -428,7 +425,7 @@ down = 'echo "down billing" >> %[1]s; [ %[2]s != billing ]'
 func TestRenewAndReleaseWithoutLeaseAreNoOps(t *testing.T) {
 	e := newTestEnv(t)
 	logFile := filepath.Join(t.TempDir(), "log")
-	root := e.project(fmt.Sprintf(twoPoolTOML, logFile))
+	root := e.project(fmt.Sprintf(twoPoolTOML, logFile), map[string]int{"dev": 2, "billing": 1})
 	nobody := holderDir(t, root, "nobody")
 	for _, args := range [][]string{{"renew"}, {"release"}, {"release", "billing"}, {"release", "dev"}} {
 		if code, out, errs := e.run(nobody, args...); code != 0 || out != "" || errs != "" {
@@ -450,13 +447,11 @@ func TestNamedPoolNamesAndPortBands(t *testing.T) {
 	root := e.project(`
 project = "demo"
 [pools.dev]
-count = 2
 ports = ["web", "api"]
 [pools.billing]
-count = 2
 ports = ["x", "y"]
 [pools.tunnel]
-`)
+`, map[string]int{"dev": 2, "billing": 2})
 	a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
 
 	d := acquirePool(t, e, a)
@@ -532,13 +527,12 @@ func TestStatusTableAndEventsCarryPool(t *testing.T) {
 	root := e.project(`
 project = "demo"
 [pools.dev]
-count = 1
 up = "true"
 down = "true"
 [pools.billing]
 up = "true"
 down = "true"
-`)
+`, map[string]int{"dev": 1})
 	a := holderDir(t, root, "a")
 	acquirePool(t, e, a)
 	acquirePool(t, e, a, "billing")
@@ -583,8 +577,8 @@ down = "true"
 	}
 }
 
-// AC-4: machineの設定でpoolごとの数を上書きできる。
-func TestMachineConfigOverridesPoolSlots(t *testing.T) {
+// machineの設定がpoolごとの数を定義する。
+func TestMachineConfigDefinesPoolSlots(t *testing.T) {
 	e := newTestEnv(t)
 	writeFile(t, filepath.Join(e.home, "config.toml"), `
 [projects.demo.pools.dev]
@@ -594,14 +588,14 @@ slots = 3
 [projects.other.pools.billing]
 slots = 9
 `)
-	root := e.project("project = \"demo\"\n[pools.dev]\ncount = 2\n[pools.billing]\ncount = 1\n[pools.tunnel]\ncount = 2\n")
+	root := e.project("project = \"demo\"\n[pools.dev]\n[pools.billing]\n[pools.tunnel]\n", map[string]int{"dev": 2, "billing": 1, "tunnel": 2})
 	slots := statusPools(t, e, root)
 	count := map[string]int{}
 	for _, s := range slots {
 		count[s.Pool]++
 	}
 	if count["dev"] != 1 || count["billing"] != 3 || count["tunnel"] != 2 {
-		t.Fatalf("machine設定で上書きされた数: %v", count)
+		t.Fatalf("machine設定の数: %v", count)
 	}
 	// 未知のkeyは、既存のmachine設定と同じくエラー。
 	writeFile(t, filepath.Join(e.home, "config.toml"), "[projects.demo.pools.billing]\nbogus = 1\n")
@@ -664,13 +658,12 @@ func TestV1StateRetainsLegacyLeaseWithoutInventingConfiguredPool(t *testing.T) {
 	e := newTestEnv(t)
 	root := e.project(`project = "demo"
 [pools.dev]
-count = 3
-`)
+`, map[string]int{"dev": 3})
 	a := holderDir(t, root, "a")
 	realRoot, _ := filepath.EvalSymlinks(root)
 	makeV1State(t, e.home, realRoot, 14000, [][]any{{1, a, 1, 1, 99999999999}})
 	slots := statusPools(t, e, a)
-	if len(slots) != 3 || slots[0].Pool != "dev" || slots[0].State != "free" {
+	if len(slots) != 4 || slots[0].Pool != "default" || slots[0].State != "lent" || slots[0].Holder != a || slots[1].Pool != "dev" || slots[1].State != "free" {
 		t.Fatalf("status: %+v", slots)
 	}
 	if v := userVersion(t, e.home); v != 2 {
@@ -701,7 +694,7 @@ func TestStateNewerThanThisVersionIsRejected(t *testing.T) {
 func TestReleaseKeepsLeaseOfPoolRemovedFromConfig(t *testing.T) {
 	e := newTestEnv(t)
 	logFile := filepath.Join(t.TempDir(), "log")
-	root := e.project(fmt.Sprintf(twoPoolTOML, logFile))
+	root := e.project(fmt.Sprintf(twoPoolTOML, logFile), map[string]int{"dev": 2, "billing": 1})
 	a := holderDir(t, root, "a")
 	acquirePool(t, e, a, "billing")
 	writeFile(t, filepath.Join(root, "slotctl.toml"), "project = \"demo\"\n")
@@ -718,5 +711,150 @@ func TestReleaseKeepsLeaseOfPoolRemovedFromConfig(t *testing.T) {
 	writeFile(t, filepath.Join(root, "slotctl.toml"), fmt.Sprintf(twoPoolTOML, logFile))
 	if s := findSlot(t, statusPools(t, e, a), "billing", 1); s.State != "lent" {
 		t.Fatalf("leaseは残るはず: %+v", s)
+	}
+}
+
+// machineが数を持ち、worktreeの操作の違いで一覧が変わらない。
+func TestMachineInventoryAcrossWorktrees(t *testing.T) {
+	e := newTestEnv(t)
+	root := e.project("project='p'\n[pools.dev]\ndown='true'\n", map[string]int{"dev": 2})
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	git(root, "init", "-q")
+	git(root, "add", "slotctl.toml")
+	git(root, "commit", "-q", "-m", "fixture")
+	a, b, c := root, filepath.Join(t.TempDir(), "b"), filepath.Join(t.TempDir(), "c")
+	git(root, "worktree", "add", "-q", b)
+	git(root, "worktree", "add", "-q", c)
+	writeFile(t, filepath.Join(a, "slotctl.toml"), "project='p'\n[pools.dev]\ndown='echo down'\n")
+	one, two := acquirePool(t, e, a), acquirePool(t, e, b)
+	if one.Name != "p-dev-1" || two.Name != "p-dev-2" {
+		t.Fatalf("名前: %+v %+v", one, two)
+	}
+	if code, _, errs := e.run(c, "acquire", "dev"); code != 3 {
+		t.Fatalf("満杯: %d %s", code, errs)
+	}
+	sa, sb := mustStatus(t, e, a), mustStatus(t, e, b)
+	if len(sa.Slots) != 2 || !reflect.DeepEqual(sa, sb) {
+		t.Fatalf("一覧不一致: %+v %+v", sa, sb)
+	}
+	t.Logf("AC1/3: %s %s、第三acquire exit3、status一致 %v", one.Name, two.Name, sa.Slots)
+}
+func TestMissingMachinePoolAndRepositoryCountGuidance(t *testing.T) {
+	e := newTestEnv(t)
+	root := e.project("project='p'\n[pools.dev]\ndown='true'\n")
+	writeFile(t, filepath.Join(e.home, "config.toml"), "")
+	if st := mustStatus(t, e, root); len(st.Slots) != 0 {
+		t.Fatalf("枠なし: %+v", st)
+	}
+	check := func(args ...string) {
+		t.Helper()
+		code, _, errs := e.run(root, args...)
+		if code != 1 || !strings.Contains(errs, filepath.Join(e.home, "config.toml")) || !strings.Contains(errs, "[projects.p.pools.dev] slots") {
+			t.Fatalf("%v: %d %s", args, code, errs)
+		}
+		t.Logf("AC2 %v: exit%d %s", args, code, errs)
+	}
+	check("acquire", "dev")
+	if code, _, _ := e.run(root, "acquire", "unknown"); code != 2 {
+		t.Fatalf("未知pool: %d", code)
+	}
+	writeFile(t, filepath.Join(root, "slotctl.toml"), "project='p'\n[pools.dev]\ncount=3\n")
+	check("acquire", "dev")
+	check("status")
+}
+func TestMachineOnlyPoolStatusAndUnknownAcquire(t *testing.T) {
+	e := newTestEnv(t)
+	root := e.project("project='p'\n")
+	writeFile(t, filepath.Join(e.home, "config.toml"), "[projects.p.pools.dev]\nslots=2\n")
+	if st := mustStatus(t, e, root); len(st.Slots) != 2 {
+		t.Fatalf("machineのみ: %+v", st)
+	}
+	if code, _, _ := e.run(root, "acquire", "dev"); code != 2 {
+		t.Fatalf("操作未定義: %d", code)
+	}
+	code, out, errs := e.run(root, "status")
+	if code != 0 || !strings.Contains(out, "未定義") {
+		t.Fatalf("down列: %d %s %s", code, out, errs)
+	}
+}
+func TestShrunkAndRemovedMachinePoolRetainsLease(t *testing.T) {
+	for _, command := range []string{"release", "reclaim"} {
+		t.Run(command, func(t *testing.T) {
+			e := newTestEnv(t)
+			root := e.project("project='p'\n[pools.dev]\nports=['web']\ndown='true'\n", map[string]int{"dev": 2})
+			a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
+			one, two := acquirePool(t, e, a), acquirePool(t, e, b)
+			writeFile(t, filepath.Join(e.home, "config.toml"), "[projects.p.pools.dev]\nslots=1\n")
+			st := mustStatus(t, e, root)
+			if len(st.Slots) != 2 || st.Slots[1].State != "lent" || st.Slots[1].Holder != two.Holder || !reflect.DeepEqual(st.Slots[1].Ports, two.Ports) {
+				t.Fatalf("縮小: %+v", st)
+			}
+			if command == "reclaim" {
+				e.advance(31 * time.Minute)
+			}
+			if code, _, errs := e.run(b, command); code != 0 {
+				t.Fatalf("返却: %d %s", code, errs)
+			}
+			st = mustStatus(t, e, root)
+			if len(st.Slots) != 1 {
+				t.Fatalf("返却後: %+v", st)
+			}
+			if command == "reclaim" {
+				one = acquirePool(t, e, a)
+			}
+			writeFile(t, filepath.Join(e.home, "config.toml"), "")
+			st = mustStatus(t, e, root)
+			if len(st.Slots) != 1 || st.Slots[0].State != "lent" || st.Slots[0].Holder != one.Holder {
+				t.Fatalf("削除: %+v", st)
+			}
+			if command == "reclaim" {
+				e.advance(31 * time.Minute)
+			}
+			if code, _, errs := e.run(a, command); code != 0 {
+				t.Fatalf("削除後返却: %d %s", code, errs)
+			}
+			if st := mustStatus(t, e, root); len(st.Slots) != 0 {
+				t.Fatalf("枠が捏造された: %+v", st)
+			}
+		})
+	}
+}
+
+func TestIncreasingMachineSlotsAllowsNextAcquire(t *testing.T) {
+	e := newTestEnv(t)
+	root := e.project("project='p'\n[pools.dev]\ndown='true'\n")
+	a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
+	first := acquirePool(t, e, a)
+	if code, _, _ := e.run(b, "acquire", "dev"); code != 3 {
+		t.Fatalf("拡張前: %d", code)
+	}
+	writeFile(t, filepath.Join(e.home, "config.toml"), "[projects.p.pools.dev]\nslots=2\n")
+	second := acquirePool(t, e, b)
+	if first.Slot != 1 || second.Slot != 2 || len(mustStatus(t, e, root).Slots) != 2 {
+		t.Fatalf("拡張後: %+v %+v", first, second)
+	}
+}
+func TestRemovedOperationKeepsLeaseOnReclaim(t *testing.T) {
+	e := newTestEnv(t)
+	root := e.project("project='p'\n[pools.dev]\ndown='true'\n")
+	original := acquirePool(t, e, root)
+	writeFile(t, filepath.Join(root, "slotctl.toml"), "project='p'\n")
+	writeFile(t, filepath.Join(e.home, "config.toml"), "")
+	e.advance(31 * time.Minute)
+	code, _, errs := e.run(root, "reclaim")
+	if code != 1 || !strings.Contains(errs, "downを実行できません") {
+		t.Fatalf("警告: %d %s", code, errs)
+	}
+	st := mustStatus(t, e, root)
+	if len(st.Slots) != 1 || st.Slots[0].Holder != original.Holder || st.Slots[0].State != "lent" || st.Slots[0].OperationsDefined {
+		t.Fatalf("保持lease: %+v", st)
 	}
 }
