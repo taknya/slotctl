@@ -20,7 +20,7 @@ AIのcoding agentを並列に動かして開発すると、1台のmachineで、�
 
 slotctlは、実行環境を「worktreeの持ち物」から「machineが持つ、数の決まった枠」に変える。
 
-- **数に上限がある。** 枠の数はprojectごとに決める。実行環境は、枠の数より増えない。
+- **数に上限がある。** 枠の数はmachineの設定でproject・poolごとに決める。実行環境は、枠の数より増えない。
 - **終わりの知らせに頼らない。** 借りた枠には期限があり、ハートビート（hookから`renew`）で延びる。連絡が途絶えた枠は、`acquire`または`reclaim`が中身を止めて空ける。
 - **期限切れでも延長できる。** 誰も借りに来ず、`reclaim_after`も過ぎていなければ、期限切れの枠もそのまま使え、ハートビートで延長できる。
 - **何が起きたかを後から確かめられる。** 貸し出し・返却・回収を記録に残す。
@@ -50,7 +50,7 @@ miseで版を固定するなら、repositoryの`mise.toml`に書く。
 
 ```toml
 [tools]
-"github:taknya/slotctl" = "0.3.0"
+"github:taknya/slotctl" = "0.4.0"
 ```
 
 Goがあれば`go install`でも入る。
@@ -83,7 +83,7 @@ mise exec -- go build -o slotctl ./cmd/slotctl
 
 ### projectの設定（`slotctl.toml`）
 
-cwdから上へ辿って最初に見つかる`slotctl.toml`を使う。repositoryにcommitする。
+poolに対する操作（`ports`・`up`・`down`）と、全pool共通の`lease`を定義する。cwdから上へ辿って最初に見つかる`slotctl.toml`を使い、repositoryにcommitする。
 
 ```toml
 project = "myapp"
@@ -93,22 +93,20 @@ ttl = "10m"                  # ハートビートで「今＋ttl」にする。�
 reclaim_after = "30m"        # 最後のハートビートから回収まで。既定30m
 
 [pools.dev]
-count = 3                    # 枠の数。既定1、最大10
 ports = ["web", "db"]        # 枠ごとに割り当てるportの名前
 # up = "..."                # 任意。新しく借りたときに走るcommand
 # 借りるだけにする場合はupを省き、必要なものを利用者が起動する。
 down = "bin/dev slot down"   # 枠の中身を全て止める
 
 [pools.billing]
-count = 1
 down = "bin/dev slot down"
 ```
 
 poolは`[pools.<名前>]`で宣言する。名前は`^[a-z][a-z0-9-]*$`で、全poolに同じ規則が適用される。`up`・`down`・`ports`は省略できる。`ttl`・`reclaim_after`は1秒以上のdurationで、全poolに共通。未知のkeyは設定の誤りにする。`[slots]`・`[ports]`・`[commands]`は使えない。
 
-### machineの設定（任意）
+### machineの設定（枠の定義）
 
-`$XDG_CONFIG_HOME/slotctl/config.toml`（既定`~/.config/slotctl/config.toml`）。
+`$XDG_CONFIG_HOME/slotctl/config.toml`（既定`~/.config/slotctl/config.toml`）。projectごとに、machineが持つpoolとその枠の数を定義する。
 
 ```toml
 port_start = 12000            # projectの帯を割り当て始めるport（既定12000）
@@ -117,11 +115,15 @@ log_retention_months = 3      # 記録を残す月数（既定3）
 [projects.myapp]
 env = { MYAPP_HOME = "~/Development/myapp-local-state" }   # commandに渡すenv（先頭の~はHOMEに展開）
 
+[projects.myapp.pools.dev]
+slots = 3
 [projects.myapp.pools.billing]
-slots = 2                     # billingのcountを上書き
+slots = 1
 ```
 
-`slotctl.toml`に無いpoolの上書きは、無視する。未知のkeyはエラーにする。枠の数の上書きは`[projects.<project>.pools.<pool>] slots`に書く。`[projects.<project>] slots`は使えない。
+`slots`は1以上10以下の整数で、各poolに必ず書く。projectまたはpoolの節が無ければ、その枠は持たない。project・pool名はrepositoryの設定と同じ規則に従う。未知のkeyはエラーにする。`[projects.<project>] slots`は使えない。
+
+節を書く入口は、利用者のprojectが用意するsetup scriptである。slotctlは自動では設定を書かない。`acquire`時にmachineのpool定義が無ければ、具体的な設定pathと書くべき節を案内して終了code 1になる。repositoryに操作の宣言が無いpoolは終了code 2になる。
 
 ### 置き場
 
@@ -180,7 +182,7 @@ holderの全poolの最後のハートビートを今にし、期限を「今＋t
 
 ### release
 
-poolを指定すればそのpoolの、省略すればholderの全poolの枠を返す。各枠の`down`が成功してからleaseを消す。失敗した枠は保持し、他の枠の返却は続ける。枠の名前と失敗の内容をstderrと記録へ出し、終了code 1で終わる。次の`release`・`acquire`・`reclaim`で再試行できる。設定から消えたpoolのleaseも、`down`を実行できないため保持して知らせる。返す枠が無ければ何もせず0。`slotctl.toml`が無い場所でも0で終わる。
+poolを指定すればそのpoolの、省略すればholderの全poolの枠を返す。各枠の`down`が成功してからleaseを消す。失敗した枠は保持し、他の枠の返却は続ける。枠の名前と失敗の内容をstderrと記録へ出し、終了code 1で終わる。次の`release`・`acquire`・`reclaim`で再試行できる。machineから消えたpoolもrepositoryに操作が残れば返せる。repositoryから操作の宣言が消えたpoolのleaseは、`down`を実行できないため保持して知らせる。返す枠が無ければ何もせず0。`slotctl.toml`が無い場所でも0で終わる。
 
 ### reclaim
 
@@ -188,7 +190,11 @@ poolを指定すればそのpoolの、省略すればholderの全poolの枠を�
 
 ### status
 
-全poolの全枠をpool名順・番号順で表示する。状態は次の2つである。期限を過ぎた貸出中の枠も`lent`として、その期限を表示する。
+machineが定義する全poolの枠と、保持している貸出中の枠をpool名順・番号順で表示する。repositoryに操作の宣言が無いpoolも表示し、`OPERATIONS`列に未定義（downなし）を示す。JSONでは`operations_defined`で表す。
+
+枠の数を減らしても上位番号の貸出は残り、返却・回収後に消える。poolを削除した場合も貸出は残り、空きを作らない。machineに定義も貸出も無ければ空一覧で成功する。増やした枠は次の`acquire`から使える。
+
+状態は次の2つである。期限を過ぎた貸出中の枠も`lent`として、その期限を表示する。
 
 | 状態 | 意味 |
 | -- | -- |

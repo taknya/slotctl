@@ -16,10 +16,9 @@ project = "demo"
 [lease]
 ttl = "10m"
 [pools.dev]
-count = 3
 ports = ["web", "db"]
 up = 'echo "up $SLOTCTL_SLOT $SLOTCTL_PORT_WEB" >> %s'
-`, logFile))
+`, logFile), map[string]int{"dev": 3})
 	a := holderDir(t, root, "a")
 	b := holderDir(t, root, "b")
 
@@ -62,9 +61,8 @@ func TestAcquireReclaimsAllExpiredAndUsesSmallestSlot(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "log")
 	root := e.project(fmt.Sprintf(`project = "demo"
 [pools.dev]
-count = 3
 down = 'echo "$SLOTCTL_NAME $SLOTCTL_HOLDER $(pwd -P)" >> %s'
-`, log))
+`, log), map[string]int{"dev": 3})
 	a, b, c := holderDir(t, root, "a"), holderDir(t, root, "b"), holderDir(t, root, "c")
 	mustAcquire(t, e, a)
 	mustAcquire(t, e, b)
@@ -107,12 +105,11 @@ project = "demo"
 [lease]
 ttl = "10m"
 [pools.dev]
-count = 2
 up = 'echo "up $SLOTCTL_SLOT" >> %[1]s'
 down = '%[2]s'
 `, logFile, down)
 	}
-	root := e.project(toml(fmt.Sprintf(`echo "down $SLOTCTL_SLOT" >> %s`, logFile)))
+	root := e.project(toml(fmt.Sprintf(`echo "down $SLOTCTL_SLOT" >> %s`, logFile)), map[string]int{"dev": 2})
 	a := holderDir(t, root, "a")
 	nobody := holderDir(t, root, "nobody")
 
@@ -182,9 +179,8 @@ func TestAcquireFailsAndDropsLeaseWhenUpFails(t *testing.T) {
 	root := e.project(`
 project = "demo"
 [pools.dev]
-count = 1
 up = "false"
-`)
+`, map[string]int{"dev": 1})
 	a := holderDir(t, root, "a")
 	code, _, errs := e.run(a, "acquire", "dev")
 	if code != 1 {
@@ -206,10 +202,9 @@ env = { EXTRA = "~/extra" }
 	root := e.project(fmt.Sprintf(`
 project = "demo"
 [pools.dev]
-count = 2
 ports = ["web", "api_db"]
 up = 'echo "$SLOTCTL_PROJECT $SLOTCTL_SLOT $SLOTCTL_NAME $SLOTCTL_HOLDER $SLOTCTL_PORT_WEB $SLOTCTL_PORT_API_DB $EXTRA $(pwd -P)" >> %s'
-`, logFile))
+`, logFile), map[string]int{"dev": 2})
 	mustAcquire(t, e, holderDir(t, root, "a"))
 	b := holderDir(t, root, "b")
 	mustAcquire(t, e, b)

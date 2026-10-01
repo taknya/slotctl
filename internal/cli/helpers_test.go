@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"github.com/BurntSushi/toml"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,11 +53,45 @@ func (e *testEnv) run(cwd string, args ...string) (int, string, string) {
 	return code, out.String(), errb.String()
 }
 
-// project は、slotctl.tomlを持つdirectoryを作って、そのpathを返す。
-func (e *testEnv) project(toml string) string {
+// project は、repositoryの操作とtemp machineの枠を用意する。
+// testの既定は各pool 1枠。明示した数と既存machine設定を優先する。
+func (e *testEnv) project(source string, counts ...map[string]int) string {
 	e.t.Helper()
 	root := e.t.TempDir()
-	writeFile(e.t, filepath.Join(root, "slotctl.toml"), toml)
+	writeFile(e.t, filepath.Join(root, "slotctl.toml"), source)
+	var pf struct {
+		Project string
+		Pools   map[string]any
+	}
+	if _, err := toml.Decode(source, &pf); err == nil && pf.Project != "" {
+		path := filepath.Join(e.home, "config.toml")
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			e.t.Fatal(err)
+		}
+		var mf struct {
+			Projects map[string]struct{ Pools map[string]any }
+		}
+		if _, err := toml.Decode(string(data), &mf); err != nil {
+			e.t.Fatal(err)
+		}
+		for name := range pf.Pools {
+			if name == "" {
+				continue
+			}
+			if _, exists := mf.Projects[pf.Project].Pools[name]; exists {
+				continue
+			}
+			n := 1
+			if len(counts) > 0 {
+				if v, ok := counts[0][name]; ok {
+					n = v
+				}
+			}
+			data = append(data, []byte(fmt.Sprintf("\n[projects.%q.pools.%q]\nslots = %d\n", pf.Project, name, n))...)
+		}
+		writeFile(e.t, path, string(data))
+	}
 	return root
 }
 

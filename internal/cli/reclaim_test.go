@@ -12,10 +12,8 @@ func TestACS1ExplicitPoolsAndRequiredAcquirePool(t *testing.T) {
 	e := newTestEnv(t)
 	root := e.project(`project = "demo"
 [pools.dev]
-count = 3
 [pools.billing]
-count = 1
-`)
+`, map[string]int{"dev": 3, "billing": 1})
 	slots := statusPools(t, e, root)
 	if len(slots) != 4 {
 		t.Fatalf("slots: %+v", slots)
@@ -65,7 +63,7 @@ func TestACS3ExpiredLeaseRenewsWithoutDown(t *testing.T) {
 
 func TestACS4ReclaimHeartbeatBoundaryAndNoOp(t *testing.T) {
 	e := newTestEnv(t)
-	root := e.project("project='demo'\n[pools.dev]\ncount=3\ndown='true'\n")
+	root := e.project("project='demo'\n[pools.dev]\ndown='true'\n", map[string]int{"dev": 3})
 	a, b, c := holderDir(t, root, "a"), holderDir(t, root, "b"), holderDir(t, root, "c")
 	mustAcquire(t, e, a)
 	e.advance(time.Minute)
@@ -107,7 +105,7 @@ func TestACS5DownFailureKeepsLeaseAndRetrySucceeds(t *testing.T) {
 		for _, count := range []int{1, 2} {
 			t.Run(fmt.Sprintf("%s/count%d", cmd, count), func(t *testing.T) {
 				e := newTestEnv(t)
-				root := e.project(fmt.Sprintf("project='demo'\n[pools.dev]\ncount=%d\ndown='false'\n", count))
+				root := e.project("project='demo'\n[pools.dev]\ndown='false'\n", map[string]int{"dev": count})
 				a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
 				mustAcquire(t, e, a)
 				e.advance(30 * time.Minute)
@@ -142,7 +140,7 @@ func TestACS5DownFailureKeepsLeaseAndRetrySucceeds(t *testing.T) {
 				if !failed {
 					t.Fatal("missing failure event")
 				}
-				writeFile(t, filepath.Join(root, "slotctl.toml"), fmt.Sprintf("project='demo'\n[pools.dev]\ncount=%d\ndown='true'\n", count))
+				writeFile(t, filepath.Join(root, "slotctl.toml"), "project='demo'\n[pools.dev]\ndown='true'\n")
 				if code, _, errs := e.run(b, "reclaim"); code != 0 {
 					t.Fatalf("retry: %d %s", code, errs)
 				}
@@ -156,7 +154,7 @@ func TestACS5DownFailureKeepsLeaseAndRetrySucceeds(t *testing.T) {
 
 func TestAcquireSameHolderOnlyRenewsBeforeReclaim(t *testing.T) {
 	e := newTestEnv(t)
-	root := e.project("project='demo'\n[pools.dev]\ncount=2\ndown='false'\n")
+	root := e.project("project='demo'\n[pools.dev]\ndown='false'\n", map[string]int{"dev": 2})
 	a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
 	mustAcquire(t, e, a)
 	mustAcquire(t, e, b)
@@ -173,7 +171,7 @@ func TestAcquireSameHolderOnlyRenewsBeforeReclaim(t *testing.T) {
 
 func TestACS6StatusOnlyLentAndFreeAfterExpiry(t *testing.T) {
 	e := newTestEnv(t)
-	root := e.project("project='demo'\n[pools.dev]\ncount=2\n")
+	root := e.project("project='demo'\n[pools.dev]\n", map[string]int{"dev": 2})
 	mustAcquire(t, e, root)
 	e.advance(11 * time.Minute)
 	for _, args := range [][]string{{"status"}, {"status", "--json"}} {
@@ -186,7 +184,7 @@ func TestACS6StatusOnlyLentAndFreeAfterExpiry(t *testing.T) {
 
 func TestFullPoolReportsHoldersAndExpiryJSON(t *testing.T) {
 	e := newTestEnv(t)
-	root := e.project("project='demo'\n[pools.dev]\ncount=2\n")
+	root := e.project("project='demo'\n[pools.dev]\n", map[string]int{"dev": 2})
 	a, b, c := holderDir(t, root, "a"), holderDir(t, root, "b"), holderDir(t, root, "c")
 	mustAcquire(t, e, a)
 	mustAcquire(t, e, b)

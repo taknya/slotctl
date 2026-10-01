@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"github.com/taknya/slotctl/internal/config"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -205,5 +206,72 @@ func TestOpenRejectsNewerSchema(t *testing.T) {
 	if s, err := Open(dir); err == nil {
 		s.Close()
 		t.Fatal("新しい版のschemaは拒むはず")
+	}
+}
+
+// machineの定義変更は、同じstateにある別holderのleaseを削除しない。
+func TestMachineInventoryChangesPreserveSharedLeases(t *testing.T) {
+	home, root := t.TempDir(), t.TempDir()
+	machine := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(filepath.Join(root, "slotctl.toml"), []byte("project='p'\n[pools.dev]\ndown='true'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(machine, []byte("[projects.p.pools.dev]\nslots=2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(func(k string) string {
+		if k == "SLOTCTL_HOME" {
+			return home
+		}
+		return ""
+	}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, _ := cfg.Pool("dev")
+	if pool.Count != 2 {
+		t.Fatalf("machine枠: %+v", pool)
+	}
+	s, err := Open(cfg.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	want := []Lease{{Project: "p", Pool: "dev", Slot: 1, Holder: "a", AcquiredAt: 1, RenewedAt: 1, ExpiresAt: 10}, {Project: "p", Pool: "dev", Slot: 2, Holder: "b", AcquiredAt: 1, RenewedAt: 1, ExpiresAt: 10}}
+	if err := s.Tx(ctx, func(tx *sql.Tx) error {
+		for _, l := range want {
+			if err := InsertLease(ctx, tx, l); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{"[projects.p.pools.dev]\nslots=1\n", ""} {
+		if err := os.WriteFile(machine, []byte(source), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := config.Load(func(k string) string {
+			if k == "SLOTCTL_HOME" {
+				return home
+			}
+			return ""
+		}, root); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Tx(ctx, func(tx *sql.Tx) error {
+			got, err := LeasesOf(ctx, tx, "p")
+			if err != nil {
+				return err
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("定義変更後のlease: %+v", got)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

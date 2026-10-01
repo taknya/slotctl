@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/taknya/slotctl/internal/command"
@@ -186,7 +187,7 @@ func (m *Manager) reclaimIn(ctx context.Context, tx *sql.Tx, trigger string, now
 		started := time.Now()
 		p, ok := m.Cfg.Pool(l.Pool)
 		var downErr error
-		if !ok {
+		if !ok || !p.OperationsDefined {
 			downErr = fmt.Errorf("%s のpool %q が設定に無く、downを実行できません", m.Cfg.SlotNameIn(l.Pool, l.Slot), l.Pool)
 			m.warnf("%v", downErr)
 		} else {
@@ -299,7 +300,7 @@ func (m *Manager) Release(ctx context.Context, pool string) error {
 			}
 			started := time.Now()
 			var downErr error
-			if p, ok := m.Cfg.Pool(l.Pool); ok {
+			if p, ok := m.Cfg.Pool(l.Pool); ok && p.OperationsDefined {
 				base, err := m.poolBand(ctx, tx, p, projectBase)
 				if err != nil {
 					return err
@@ -338,13 +339,14 @@ const (
 
 // SlotStatus は、1つの枠の状態である。
 type SlotStatus struct {
-	Pool      string
-	Slot      int
-	Name      string
-	State     State
-	Holder    string
-	ExpiresAt int64
-	Ports     []ports.Port
+	OperationsDefined bool
+	Pool              string
+	Slot              int
+	Name              string
+	State             State
+	Holder            string
+	ExpiresAt         int64
+	Ports             []ports.Port
 }
 
 // Status は、projectの全poolの全枠の状態を、poolの名前順で返す。
@@ -379,13 +381,31 @@ func (m *Manager) Status(ctx context.Context) ([]SlotStatus, error) {
 	var out []SlotStatus
 	for i, p := range pools {
 		for slot := 1; slot <= p.Count; slot++ {
-			st := SlotStatus{Pool: p.Name, Slot: slot, Name: m.Cfg.SlotNameIn(p.Name, slot), State: Free, Ports: ports.Assign(p.PortNames, bases[i], slot)}
+			st := SlotStatus{Pool: p.Name, Slot: slot, Name: m.Cfg.SlotNameIn(p.Name, slot), State: Free, Ports: ports.Assign(p.PortNames, bases[i], slot), OperationsDefined: p.OperationsDefined}
 			if l, ok := byKey[key{p.Name, slot}]; ok {
+				delete(byKey, key{p.Name, slot})
 				st.State = Lent
 				st.Holder, st.ExpiresAt = l.Holder, l.ExpiresAt
 			}
 			out = append(out, st)
 		}
 	}
+	for _, l := range byKey {
+		st := SlotStatus{Pool: l.Pool, Slot: l.Slot, Name: m.Cfg.SlotNameIn(l.Pool, l.Slot), State: Lent, Holder: l.Holder, ExpiresAt: l.ExpiresAt}
+		for i, p := range pools {
+			if p.Name == l.Pool {
+				st.OperationsDefined = p.OperationsDefined
+				st.Ports = ports.Assign(p.PortNames, bases[i], l.Slot)
+				break
+			}
+		}
+		out = append(out, st)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Pool != out[j].Pool {
+			return out[i].Pool < out[j].Pool
+		}
+		return out[i].Slot < out[j].Slot
+	})
 	return out, nil
 }
