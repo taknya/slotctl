@@ -19,14 +19,13 @@ import (
 const DBName = "state.db"
 
 // schemaVersion は、state.dbのschemaの版（PRAGMA user_version）。
-// 1はv0.1.0（leaseが(project, slot)で決まる）。2はpoolを持つ。
-const schemaVersion = 2
+// 1はv0.1.0（leaseが(project, slot)で決まる）。2はpoolを持つ。3はprojectを名前だけで識別する。
+const schemaVersion = 3
 
 // projects.port_baseはprojectの最初のpool用に確保する帯。各poolの帯はpool_bandsに記録する。
 const schemaSQL = `
 CREATE TABLE projects (
 	name TEXT PRIMARY KEY,
-	repo TEXT NOT NULL,
 	port_base INTEGER NOT NULL
 );
 CREATE TABLE pool_bands (
@@ -70,6 +69,9 @@ INSERT INTO leases_v2(project, pool, slot, holder, acquired_at, renewed_at, expi
 DROP TABLE leases;
 ALTER TABLE leases_v2 RENAME TO leases;
 `
+
+// migrateV2SQL は、projectとrepositoryの結びつきを捨てる。port帯とleaseは保つ。
+const migrateV2SQL = `ALTER TABLE projects DROP COLUMN repo;`
 
 // Lease は、枠の貸し出しである。時刻はUnix秒。
 type Lease struct {
@@ -142,9 +144,18 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 				return err
 			}
-		case v == 1:
-			if _, err := tx.ExecContext(ctx, migrateV1SQL); err != nil {
-				return err
+		default:
+			// 古い版から順に、今の版まで移行する。
+			for _, step := range []struct {
+				from int
+				sql  string
+			}{{1, migrateV1SQL}, {2, migrateV2SQL}} {
+				if v > step.from {
+					continue
+				}
+				if _, err := tx.ExecContext(ctx, step.sql); err != nil {
+					return err
+				}
 			}
 		}
 		_, err := tx.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
@@ -167,15 +178,11 @@ func (s *Store) Tx(ctx context.Context, fn func(*sql.Tx) error) error {
 
 // EnsureProject は、projectを記録して、そのport帯の先頭を返す。
 // 初めてのprojectには、portStartから1000ずつ空いている帯を割り当てる。
-// 同じnameを別のrepositoryが名乗ったら拒む。
-func EnsureProject(ctx context.Context, tx *sql.Tx, name, repo string, portStart int) (int, error) {
-	var storedRepo string
+// projectは名前だけで識別する。どのrepositoryから呼ばれたかは問わない。
+func EnsureProject(ctx context.Context, tx *sql.Tx, name string, portStart int) (int, error) {
 	var base int
-	err := tx.QueryRowContext(ctx, `SELECT repo, port_base FROM projects WHERE name = ?`, name).Scan(&storedRepo, &base)
+	err := tx.QueryRowContext(ctx, `SELECT port_base FROM projects WHERE name = ?`, name).Scan(&base)
 	if err == nil {
-		if storedRepo != repo {
-			return 0, fmt.Errorf("project %q は別のrepository（%s）が使っています。このrepositoryは %s です", name, storedRepo, repo)
-		}
 		return base, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -185,7 +192,7 @@ func EnsureProject(ctx context.Context, tx *sql.Tx, name, repo string, portStart
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO projects(name, repo, port_base) VALUES (?, ?, ?)`, name, repo, base); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO projects(name, port_base) VALUES (?, ?)`, name, base); err != nil {
 		return 0, err
 	}
 	return base, nil

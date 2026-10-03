@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -21,34 +20,31 @@ func open(t *testing.T) *Store {
 	return s
 }
 
-func ensure(t *testing.T, s *Store, name, repo string) (int, error) {
+func ensure(t *testing.T, s *Store, name string) (int, error) {
 	t.Helper()
 	var base int
 	err := s.Tx(context.Background(), func(tx *sql.Tx) error {
 		var err error
-		base, err = EnsureProject(context.Background(), tx, name, repo, 12000)
+		base, err = EnsureProject(context.Background(), tx, name, 12000)
 		return err
 	})
 	return base, err
 }
 
-// AC-5: 2つのprojectのport帯は重ならず、同名を別のrepositoryが名乗ると失敗する。
-func TestEnsureProjectAssignsBandsAndRejectsOtherRepository(t *testing.T) {
+// AC-5: 2つのprojectのport帯は重ならず、同じprojectの帯は変わらない。
+func TestEnsureProjectAssignsBands(t *testing.T) {
 	s := open(t)
-	one, err := ensure(t, s, "one", "/repo/one")
+	one, err := ensure(t, s, "one")
 	if err != nil || one != 12000 {
 		t.Fatalf("one: %d %v", one, err)
 	}
-	two, err := ensure(t, s, "two", "/repo/two")
+	two, err := ensure(t, s, "two")
 	if err != nil || two != 13000 {
 		t.Fatalf("two: %d %v", two, err)
 	}
-	again, err := ensure(t, s, "one", "/repo/one")
+	again, err := ensure(t, s, "one")
 	if err != nil || again != one {
 		t.Fatalf("同じprojectの帯は変わらないはず: %d %v", again, err)
-	}
-	if _, err := ensure(t, s, "one", "/repo/other"); err == nil || !strings.Contains(err.Error(), "別のrepository") {
-		t.Fatalf("別repositoryの同名projectは拒むはず: %v", err)
 	}
 }
 
@@ -115,7 +111,7 @@ func TestEnsurePoolBandAvoidsEveryUsedBand(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
 	err := s.Tx(ctx, func(tx *sql.Tx) error {
-		one, err := EnsureProject(ctx, tx, "one", "/repo/one", 12000)
+		one, err := EnsureProject(ctx, tx, "one", 12000)
 		if err != nil || one != 12000 {
 			t.Fatalf("one: %d %v", one, err)
 		}
@@ -123,7 +119,7 @@ func TestEnsurePoolBandAvoidsEveryUsedBand(t *testing.T) {
 		if err != nil || b1 != 12000 {
 			t.Fatalf("billing: %d %v", b1, err)
 		}
-		two, err := EnsureProject(ctx, tx, "two", "/repo/two", 12000)
+		two, err := EnsureProject(ctx, tx, "two", 12000)
 		if err != nil || two != 13000 {
 			t.Fatalf("poolの帯とも重ならないはず: %d %v", two, err)
 		}
@@ -187,6 +183,61 @@ func TestOpenMigratesV1ToDefaultPool(t *testing.T) {
 		}
 		// 新しいschemaで、同じ番号の枠を別のpoolが持てる。
 		return InsertLease(ctx, tx, Lease{Project: "p", Pool: "billing", Slot: 2, Holder: "a", AcquiredAt: 1, RenewedAt: 1, ExpiresAt: 9})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// v0.4.0のstate.db（user_version 2）を開くと、projectのrepository列が無くなり、port帯とleaseは保たれる。
+func TestOpenMigratesV2DropsProjectRepository(t *testing.T) {
+	dir := t.TempDir()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, DBName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE projects (name TEXT PRIMARY KEY, repo TEXT NOT NULL, port_base INTEGER NOT NULL)`,
+		`CREATE TABLE pool_bands (project TEXT NOT NULL, pool TEXT NOT NULL, port_base INTEGER NOT NULL, PRIMARY KEY (project, pool))`,
+		`CREATE TABLE leases (project TEXT NOT NULL, pool TEXT NOT NULL, slot INTEGER NOT NULL, holder TEXT NOT NULL, acquired_at INTEGER NOT NULL, renewed_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (project, pool, slot))`,
+		`INSERT INTO projects VALUES ('sapilio', '/old/clone/.git', 12000)`,
+		`INSERT INTO pool_bands VALUES ('sapilio', 'dev', 12000), ('sapilio', 'test', 13000)`,
+		`INSERT INTO leases VALUES ('sapilio', 'dev', 1, '/old/clone', 1, 2, 30)`,
+		`PRAGMA user_version = 2`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	err = s.Tx(ctx, func(tx *sql.Tx) error {
+		var v int
+		if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
+			t.Fatalf("user_version: %d %v", v, err)
+		}
+		var repoColumns int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('projects') WHERE name = 'repo'`).Scan(&repoColumns); err != nil || repoColumns != 0 {
+			t.Fatalf("repo列は無くなるはず: %d %v", repoColumns, err)
+		}
+		if base, err := EnsureProject(ctx, tx, "sapilio", 12000); err != nil || base != 12000 {
+			t.Fatalf("projectの帯は保たれるはず: %d %v", base, err)
+		}
+		for pool, want := range map[string]int{"dev": 12000, "test": 13000} {
+			if band, err := EnsurePoolBand(ctx, tx, "sapilio", pool, 12000); err != nil || band != want {
+				t.Fatalf("%sの帯は保たれるはず: %d %v", pool, band, err)
+			}
+		}
+		if ls, err := LeasesOf(ctx, tx, "sapilio"); err != nil || len(ls) != 1 {
+			t.Fatalf("leaseは保たれるはず: %+v %v", ls, err)
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)

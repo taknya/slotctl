@@ -1,4 +1,4 @@
-// Package holder は、枠の借り手（holder）とrepositoryの識別を解決する。
+// Package holder は、枠の借り手（holder）を解決する。
 package holder
 
 import (
@@ -29,35 +29,17 @@ func gitOutput(dir string, args ...string) (string, bool) {
 	return strings.TrimSpace(out.String()), true
 }
 
-// Resolve は、借り手（holder）とrepositoryの識別を返す。
+// Resolve は、借り手（holder）を返す。
 //
 // holderは、gitのworktreeの実path。gitの外ならcwdの実path。
-// repositoryは、gitのcommon dirの実path。gitの外ならslotctl.tomlのあるdirectory。
-func Resolve(cwd, configRoot string) (holder, repo string, err error) {
+func Resolve(cwd string) (string, error) {
 	real, err := RealPath(cwd)
 	if err != nil {
-		return "", "", fmt.Errorf("cwdを解決できません: %w", err)
+		return "", fmt.Errorf("cwdを解決できません: %w", err)
 	}
 	top, ok := gitOutput(real, "rev-parse", "--show-toplevel")
 	if !ok || top == "" {
-		root, err := RealPath(configRoot)
-		if err != nil {
-			return "", "", err
-		}
-		return real, root, nil
+		return real, nil
 	}
-	if holder, err = RealPath(top); err != nil {
-		return "", "", err
-	}
-	common, ok := gitOutput(real, "rev-parse", "--git-common-dir")
-	if !ok || common == "" {
-		return "", "", fmt.Errorf("git common dir を解決できません")
-	}
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(real, common)
-	}
-	if repo, err = RealPath(common); err != nil {
-		return "", "", err
-	}
-	return holder, repo, nil
+	return RealPath(top)
 }

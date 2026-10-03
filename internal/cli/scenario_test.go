@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -73,20 +72,26 @@ func TestPortStartFromMachineConfig(t *testing.T) {
 	}
 }
 
-func TestSameProjectNameFromAnotherRepositoryIsRejected(t *testing.T) {
+// projectは名前だけで識別する。別のclone（repository）から同じ名前で呼んでも、同じ枠とport帯を使う。
+func TestSameProjectNameFromAnotherCloneSharesSlotsAndBand(t *testing.T) {
 	e := newTestEnv(t)
-	first := e.project("project = \"demo\"\n[pools.dev]\n")
-	other := e.project("project = \"demo\"\n[pools.dev]\n")
-	mustAcquire(t, e, first)
-	code, _, errs := e.run(other, "acquire", "dev")
-	if code != 1 || !strings.Contains(errs, "別のrepository") {
-		t.Fatalf("別repositoryの同名projectは拒むはず: code=%d %s", code, errs)
+	toml := "project = \"demo\"\n[pools.dev]\nports = [\"web\"]\n"
+	first := e.project(toml, map[string]int{"dev": 3})
+	other := e.project(toml)
+	a := mustAcquire(t, e, first)
+	b := mustAcquire(t, e, other)
+	if a.Project != "demo" || b.Project != "demo" || a.Slot != 1 || b.Slot != 2 {
+		t.Fatalf("同じprojectの別の枠のはず: %+v %+v", a, b)
 	}
-	if code, _, _ := e.run(other, "status"); code != 1 {
-		t.Fatalf("statusも拒むはず: %d", code)
+	if a.Ports["web"] != 12000 || b.Ports["web"] != 12100 {
+		t.Fatalf("同じport帯のはず: %+v %+v", a.Ports, b.Ports)
 	}
-	// もとのrepositoryは影響を受けない。
-	mustAcquire(t, e, first)
+	if st := mustStatus(t, e, other); len(st.Slots) != 3 {
+		t.Fatalf("別のcloneからも同じprojectの全枠が見えるはず: %d", len(st.Slots))
+	}
+	if code, _, errs := e.run(other, "release"); code != 0 {
+		t.Fatalf("別のcloneでも自分の枠を返せるはず: %d %s", code, errs)
+	}
 }
 
 func TestInvalidConfigIsRejected(t *testing.T) {

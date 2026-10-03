@@ -50,7 +50,7 @@ miseで版を固定するなら、repositoryの`mise.toml`に書く。
 
 ```toml
 [tools]
-"github:taknya/slotctl" = "0.4.0"
+"github:taknya/slotctl" = "0.5.0"
 ```
 
 Goがあれば`go install`でも入る。
@@ -143,7 +143,7 @@ portは、poolごとにmachineで空いている1000個の帯から割り当て�
 port = 帯の先頭 + 100 × (slot − 1) + portの名前の順番
 ```
 
-同じpoolの帯は変わらず、pool・projectどうしの帯は重ならない。同じ`project`名を別のrepository（git common dir。gitの外なら`slotctl.toml`のあるdirectory）が名乗ると失敗する。
+同じpoolの帯は変わらず、pool・projectどうしの帯は重ならない。projectは`slotctl.toml`の`project`名だけで識別する。repositoryを別の場所へ移しても、別のcloneから使っても、同じ名前なら同じ枠とport帯を使う。
 
 ## 命令
 
@@ -293,7 +293,7 @@ internal/store/     SQLite（schema・移行・transaction・projects・port帯�
 internal/lease/     acquire・renew・release・reclaim・statusの規則（時刻は注入）
 internal/command/   up・downをenvつきで`sh -c`で走らせる
 internal/eventlog/  JSON Linesの追記、月ごとのfile、ローテーション
-internal/holder/    holderとrepositoryの識別
+internal/holder/    holderの識別
 internal/ports/     portの帯と割り当て
 internal/cli/       flag・出力・終了code
 ```
