@@ -666,7 +666,7 @@ func TestV1StateRetainsLegacyLeaseWithoutInventingConfiguredPool(t *testing.T) {
 	if len(slots) != 4 || slots[0].Pool != "default" || slots[0].State != "lent" || slots[0].Holder != a || slots[1].Pool != "dev" || slots[1].State != "free" {
 		t.Fatalf("status: %+v", slots)
 	}
-	if v := userVersion(t, e.home); v != 2 {
+	if v := userVersion(t, e.home); v != 3 {
 		t.Fatalf("version=%d", v)
 	}
 }

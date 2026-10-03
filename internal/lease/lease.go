@@ -28,7 +28,6 @@ type Manager struct {
 	Cfg    *config.Config
 	Store  *store.Store
 	Holder string
-	Repo   string
 	Now    func() time.Time
 	Runner Runner
 	Events *eventlog.Log
@@ -100,7 +99,7 @@ func (m *Manager) Acquire(ctx context.Context, pool config.Pool) (*Grant, error)
 	var g Grant
 	var noSlot *NoSlotError
 	err := m.Store.Tx(ctx, func(tx *sql.Tx) error {
-		projectBase, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Repo, m.Cfg.PortStart)
+		projectBase, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Cfg.PortStart)
 		if err != nil {
 			return err
 		}
@@ -215,7 +214,7 @@ func (m *Manager) reclaimIn(ctx context.Context, tx *sql.Tx, trigger string, now
 func (m *Manager) Reclaim(ctx context.Context) error {
 	var failures []error
 	err := m.Store.Tx(ctx, func(tx *sql.Tx) error {
-		base, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Repo, m.Cfg.PortStart)
+		base, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Cfg.PortStart)
 		if err != nil {
 			return err
 		}
@@ -281,13 +280,8 @@ func (m *Manager) Renew(ctx context.Context) error {
 func (m *Manager) Release(ctx context.Context, pool string) error {
 	var failures []error
 	err := m.Store.Tx(ctx, func(tx *sql.Tx) error {
-		_, found, err := store.ProjectBase(ctx, tx, m.Cfg.Project)
+		projectBase, found, err := store.ProjectBase(ctx, tx, m.Cfg.Project)
 		if err != nil || !found {
-			return err
-		}
-		// 設定を別repositoryから使って既存leaseを止めることを防ぐ。
-		projectBase, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Repo, m.Cfg.PortStart)
-		if err != nil {
 			return err
 		}
 		leases, err := store.LeasesOfHolder(ctx, tx, m.Cfg.Project, m.Holder)
@@ -355,7 +349,7 @@ func (m *Manager) Status(ctx context.Context) ([]SlotStatus, error) {
 	bases := make([]int, len(pools))
 	var leases []store.Lease
 	err := m.Store.Tx(ctx, func(tx *sql.Tx) error {
-		projectBase, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Repo, m.Cfg.PortStart)
+		projectBase, err := store.EnsureProject(ctx, tx, m.Cfg.Project, m.Cfg.PortStart)
 		if err != nil {
 			return err
 		}

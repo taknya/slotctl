@@ -146,7 +146,7 @@ func (a *App) open() (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	h, repo, err := holder.Resolve(a.Cwd, cfg.Root)
+	h, err := holder.Resolve(a.Cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,6 @@ func (a *App) open() (*session, error) {
 			Cfg:    cfg,
 			Store:  st,
 			Holder: h,
-			Repo:   repo,
 			Now:    a.Now,
 			Runner: &command.Runner{Out: a.Stderr},
 			Events: &eventlog.Log{Dir: cfg.StateDir, Project: cfg.Project, RetentionMonths: cfg.LogRetentionMonths, Now: a.Now},
