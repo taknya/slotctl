@@ -160,7 +160,7 @@ slotctl status [--json]          全poolの全枠の状態を出す
 1つのtransaction（`BEGIN IMMEDIATE`）で次の順に決める。
 
 1. 同じholderのそのpoolの枠があれば延長して返す。commandも記録も走らせない。
-2. projectの全poolの期限切れの枠を、それぞれ元のholderのenvとcwdで`down`して空ける。
+2. projectの全poolの期限切れの枠を、それぞれ元のholderのenvとcwdで`down`して空ける（holderのdirectoryが無ければ、`slotctl.toml`のある場所をcwdにする）。
 3. 指定poolの空き枠から、最も小さい番号を貸す。
 4. 空きが無ければ終了code 3。そのpoolのholderと期限を表示する。
 
@@ -186,7 +186,7 @@ poolを指定すればそのpoolの、省略すればholderの全poolの枠を�
 
 ### reclaim
 
-引数は取らない。projectの全poolで、最後のハートビートから`reclaim_after`以上たった枠を、使っている最中でも`down`して空ける。空ける枠が無ければ出力も記録もなく0で終わる。`down`が失敗した枠は保持し、失敗を知らせて終了code 1で終わる。他の枠の回収は続け、次回に再試行する。`slotctl.toml`が無い場所では0で終わる。
+引数は取らない。projectの全poolで、最後のハートビートから`reclaim_after`以上たった枠を、使っている最中でも`down`して空ける。空ける枠が無ければ出力も記録もなく0で終わる。holderのdirectoryが無い枠も、`slotctl.toml`のある場所をcwdにして`down`し、成功すれば空ける。`down`が失敗した枠は保持し、失敗を知らせて終了code 1で終わる。他の枠の回収は続け、次回に再試行する。`slotctl.toml`が無い場所では0で終わる。
 
 ### status
 
@@ -203,7 +203,7 @@ machineが定義する全poolの枠と、保持している貸出中の枠をpoo
 
 ## commandに渡すenv
 
-`up`・`down`は、そのpoolのcommandである。holderのworktreeをcwdにして`sh -c`で走る。commandの出力はstderrへ流れる（`acquire --json`のstdoutを汚さない）。
+`up`・`down`は、そのpoolのcommandである。holderのworktreeをcwdにして`sh -c`で走る。ただし、`down`でholderのdirectoryが無いとき（worktreeを消された後の回収など）は、`slotctl.toml`を見つけた場所（呼んだ側のworktree）をcwdにして走る。`SLOTCTL_HOLDER`は元のholderのままである。`down`は、holderのdirectoryの中身に頼らず、枠の名前・番号・portなどのenvだけで止める物を決める約束にする。commandの出力はstderrへ流れる（`acquire --json`のstdoutを汚さない）。
 
 | 名前                          | 値                              |
 | ----------------------------- | ------------------------------- |

@@ -858,3 +858,72 @@ func TestRemovedOperationKeepsLeaseOnReclaim(t *testing.T) {
 		t.Fatalf("保持lease: %+v", st)
 	}
 }
+
+// holderのdirectoryが消えた期限切れの枠は、slotctl.tomlのある場所で`down`してから空く。
+// SLOTCTL_HOLDERは元のholderのままである。
+func TestReclaimRunsDownInConfigRootWhenHolderDirIsGone(t *testing.T) {
+	for _, via := range []string{"reclaim", "acquire"} {
+		t.Run(via, func(t *testing.T) {
+			e := newTestEnv(t)
+			logFile := filepath.Join(t.TempDir(), "log")
+			root := e.project(fmt.Sprintf(`
+project = "demo"
+[pools.dev]
+down = 'echo "$(pwd -P) $SLOTCTL_HOLDER" >> %s'
+`, logFile), map[string]int{"dev": 1})
+			a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
+			acquirePool(t, e, a)
+			if err := os.RemoveAll(a); err != nil {
+				t.Fatal(err)
+			}
+			e.advance(time.Hour + 10*time.Minute)
+			if via == "reclaim" {
+				if code, _, errs := e.run(b, "reclaim"); code != 0 {
+					t.Fatalf("reclaim code=%d (%s)", code, errs)
+				}
+			} else {
+				acquirePool(t, e, b) // bが借りられるのは、aの枠が空いたから
+			}
+			if via == "reclaim" {
+				if s := findSlot(t, statusPools(t, e, b), "dev", 1); s.State != "free" {
+					t.Fatalf("枠が空くはず: %+v", s)
+				}
+			}
+			realRoot, _ := filepath.EvalSymlinks(root)
+			if got := readLines(t, logFile); !reflect.DeepEqual(got, []string{realRoot + " " + a}) {
+				t.Fatalf("downのcwdとholder: %v", got)
+			}
+			ok := false
+			for _, ev := range rawEvents(t, e.home) {
+				if ev["event"] == "down" && ev["holder"] == a && ev["ok"] == true {
+					ok = true
+				}
+			}
+			if !ok {
+				t.Fatalf("downの成功の記録が無い")
+			}
+		})
+	}
+}
+
+// holderのdirectoryが消えていて、downが失敗した枠は保持する。
+func TestReclaimKeepsLeaseWhenDownFailsAndHolderDirIsGone(t *testing.T) {
+	e := newTestEnv(t)
+	root := e.project(`
+project = "demo"
+[pools.dev]
+down = 'exit 1'
+`, map[string]int{"dev": 1})
+	a, b := holderDir(t, root, "a"), holderDir(t, root, "b")
+	acquirePool(t, e, a)
+	if err := os.RemoveAll(a); err != nil {
+		t.Fatal(err)
+	}
+	e.advance(time.Hour + 10*time.Minute)
+	if code, _, _ := e.run(b, "reclaim"); code != 1 {
+		t.Fatalf("code=%d want 1", code)
+	}
+	if s := findSlot(t, statusPools(t, e, b), "dev", 1); s.State != "lent" {
+		t.Fatalf("保持するはず: %+v", s)
+	}
+}
