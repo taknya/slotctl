@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"sort"
 	"time"
 
@@ -245,13 +247,22 @@ func (m *Manager) runUp(ctx context.Context, pool config.Pool, g *Grant) error {
 	return err
 }
 
+// downDir は、downを走らせるcwdを返す。holderのdirectoryがあればそこ、無ければ（worktreeを消された後など）
+// slotctl.tomlを見つけた場所にする。envのSLOTCTL_HOLDERは元のholderのままである。
+func (m *Manager) downDir(holder string) string {
+	if _, err := os.Stat(holder); errors.Is(err, fs.ErrNotExist) {
+		return m.Cfg.Root
+	}
+	return holder
+}
+
 // runDown は、holderのenvでpoolのdownを走らせて記録する。失敗は警告を出して、errorを返す。
 func (m *Manager) runDown(pool config.Pool, slot int, holder string, base int) error {
 	if pool.Down == "" {
 		return nil
 	}
 	started := time.Now()
-	err := m.Runner.Run(pool.Down, holder, m.vars(pool.Name, slot, holder, pool.PortNames, base))
+	err := m.Runner.Run(pool.Down, m.downDir(holder), m.vars(pool.Name, slot, holder, pool.PortNames, base))
 	ev := eventlog.Event{Event: "down", Pool: pool.Name, Holder: holder, Slot: slot, OK: eventlog.BoolPtr(err == nil), MS: eventlog.MS(time.Since(started))}
 	if err != nil {
 		ev.Error = err.Error()
